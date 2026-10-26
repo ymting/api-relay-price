@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from _diagnose_account_auth import probe_site, redact_message
+from diagnose_account_auth import probe_site, redact_message
 from integrations.providers import HttpResponse
 from tests.test_stage_c import FakeTransport
 

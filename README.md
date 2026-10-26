@@ -137,6 +137,7 @@ node tests/test_site_framework_ui.js
 python tests/check_page_syntax.py        # 从 HTML 抽取内联脚本做语法检查
 python tests/check_stage_d_browser.py    # 需本机 Edge
 python -X utf8 tests/check_key_ccs_browser.py # 创建／导入交互；隔离远端与系统唤起
+python -X utf8 diagnose_account_auth.py    # 只读比对账户鉴权形式，结果写 logs/（不发写请求）
 ```
 
 账户刷新在后台执行，最多同时读取 **3 个站点**；每完成一站就保存并显示该站结果，慢站不会挡住快站。页面每 700 毫秒读取本地进度，中途关闭或刷新页面不影响任务。同一站点内部按功能顺序读取，New API 的账户资料在同一轮刷新中复用，避免为资料、余额、已用分别重复请求；下一轮会重新读取。价格采集仍按「定时设置」中的站点间隔串行执行。
