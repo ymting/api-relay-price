@@ -19,6 +19,23 @@ python -X utf8 tests/check_page_syntax.py  # Inline JavaScript syntax
 
 Use `启动服务.bat` for normal operation with scheduling. `python -X utf8 fetch_prices.py --only <site-id>` performs real collection and writes snapshots; use it deliberately.
 
+## Deployment
+
+Full manual: `DEPLOY.md` (Chinese). Its section 9 is a machine-executable checklist written for AI agents.
+
+Three targets: Windows local (double-click `启动服务.bat`), Docker Compose (recommended for Linux servers), systemd + source. All three share one state directory (`sites.json`, `settings.json`, `auth.json`, `data/`, `logs/`); moving that directory is the whole migration.
+
+Hard constraints — do not violate these when deploying or editing deployment files:
+
+1. Never publish the business port on `0.0.0.0`. It binds `127.0.0.1` behind a reverse proxy; going public requires `RELAY_ALLOWED_ORIGINS` and `RELAY_ALLOWED_HOSTS` to match the real domain and scheme.
+2. Never skip `python server.py --init-auth`. With auth enabled and no `auth.json`, the process exits with code 1 and the container restart-loops.
+3. Never lower `stop_grace_period` / `TimeoutStopSec` below 45s — graceful shutdown needs that budget to finish writing state.
+4. Never use `:latest` or `:dev-latest` in production. Pin a version tag or a digest.
+5. Never edit `sites.json` inside a container; edit the host copy in the state directory.
+6. Never commit credentials, `auth.json`, or a filled `sites.json`.
+
+After any deployment change, run `python -X utf8 tests/smoke_deploy.py --mode process` (or `--mode docker` when Docker is available).
+
 ## Coding Style & Naming Conventions
 
 Use four-space Python indentation, `snake_case` functions/variables, `PascalCase` classes, and `UPPER_SNAKE_CASE` constants. Follow the frontend's two-space indentation and `camelCase` functions. Keep cross-module names and types consistent. Add concise Chinese comments for business rules and state transitions. Save files as UTF-8. No shared formatter configuration is present; preserve surrounding style.

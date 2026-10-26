@@ -301,6 +301,10 @@ python -X utf8 diagnose_account_auth.py    # 只读比对账户鉴权形式，�
 | `data/write_operations.json` | Key 创建/修改/删除的操作记录（**不含明文凭据**），进程重启后据此对账 |
 | `data/evidence_matrix.jsonl` | 「站点 × 功能」调用证据（提供者/模式/触发源/成败/耗时，**不含凭据**），用于判断某个功能能否停用旧 Cookie 兼容链路 |
 | `tests/` | A–E 各阶段的合成专项测试（`python -m unittest discover -s tests`） |
+| `bump_version.py` | 版本号维护：`--dev` 递增序号、`--release` 去后缀定版（`VERSION` 是唯一来源） |
+| `diagnose_account_auth.py` | 只读比对账户鉴权形式，结果写 `logs/`，不发写请求 |
+| `Dockerfile`、`compose.example.yaml`、`deploy/` | 容器镜像、Compose 样例、systemd unit 与 Caddy 反代样例 |
+| `DEPLOY.md` | 完整部署手册：三种方式、排障、备份、给 AI Agent 的可执行步骤 |
 | `docs/`、`memory/` | 设计文档与项目记忆（本机目录，已在 `.gitignore` 中排除，不随仓库分发） |
 
 `index.json` 是轻量索引（压缩后约 8KB），首屏秒开；某模型的完整报价在点开时才按需请求。**采集价格.bat** 保留了命令行入口，不想开服务时用它可以手动跑一次采集；加 `--debug` 会多打印一行每个站点的逐功能诊断（提供者、端点、状态），排查"这个站的这个功能到底走没走通"时很有用，诊断只输出到控制台、不会写进快照。
@@ -362,14 +366,63 @@ git push
 
 版本号由 CI 把关：`dev` 的 `VERSION` 必须是 `X.Y.Z-n`；Release 标签必须与 `VERSION` 完全一致且不带后缀，并且标签所在提交必须在 `main` 上。每次完成并验证一项修改后提交，才会留下新的版本；Git 不会自动保存每次编辑。
 
-## Linux / Docker 常驻部署
+## 部署
 
-2026-10-26 复核：基础适配已落地，但发布前检查尚未收尾：镜像目前先推送后冒烟；正式 tag 尚缺严格格式、与 `VERSION` 一致及 main 来源检查；账户刷新中的有界停机、Compose 默认 UID / 只读运行 / 停止退出码仍需补验。首次 Linux / Docker 迁移尚未执行，不能将 Windows 回归通过视作实机部署完成。以上闸门以 CI 实际结果为准，未收尾前不建议用于生产。
+三种方式，按场景选一种。完整手册（排障、备份、环境变量全表、给 AI Agent 的可执行步骤）见 [`DEPLOY.md`](DEPLOY.md)。
 
-Windows 双击 `启动服务.bat` 的用法不变：不设置 `RELAY_MODE` 时就是 `local` 模式，
-只监听 `127.0.0.1`、按 8765–8770 顺序找空端口、认证默认关闭。
+| 方式 | 适合 | 需要 |
+| --- | --- | --- |
+| Windows 本地 | 自己电脑上看数据 | Python 3.10+ |
+| Docker Compose | 有 Docker 的 Linux 服务器，推荐 | Docker 24+ / Compose v2 |
+| systemd + 源码 | 不想装 Docker；Debian / Ubuntu | Python 3.10+ |
 
-要让服务器长期运行，需要显式切到 `server` 模式。必需变量（缺一项就拒绝启动，不会悄悄退回代码目录）：
+三种方式的数据都在同一个状态目录里：`sites.json`（站点与凭据）、`settings.json`（偏好）、`auth.json`（登录密码）、`data/`（快照）、`logs/`。换方式只要把这个目录搬过去就能接着用；其中只有前两个值得认真备份。
+
+> **容器部署必看**：开了访问保护却没有 `auth.json` 时，服务会以**退出码 1** 退出，容器反复重启。第一次启动前必须跑一次 `--init-auth`。
+
+### Windows 本地
+
+双击 `启动服务.bat` 即可。不设置 `RELAY_MODE` 时就是 `local` 模式：只监听 `127.0.0.1`、按 8765–8770 顺序找空端口、认证默认关闭。
+
+### Docker Compose
+
+```bash
+sudo install -d -m 0700 -o 10001 -g 10001 /var/lib/relay-price   # 属主必须是 10001，否则启动即报权限错误
+sudo mkdir -p /etc/relay-price
+sudo cp compose.example.yaml /etc/relay-price/compose.yaml
+# 把 compose.yaml 里的 RELAY_ALLOWED_ORIGINS / RELAY_ALLOWED_HOSTS 改成你的域名
+
+cd /etc/relay-price
+sudo docker compose run --rm -it app python server.py --init-auth   # 必须先初始化访问保护
+sudo docker compose up -d
+curl --noproxy '*' -fsS http://127.0.0.1:8765/healthz               # {"ok": true, "version": "1.0.0"}
+```
+
+镜像地址 `ghcr.io/ymting/api-relay-price`：`:1.0.0` 是当前正式版，`:latest` 跟随最新正式版，`:dev-latest` 是最新开发构建（功能最新但不保证稳定）。
+
+业务端口只发布到 `127.0.0.1`，HTTPS 交给宿主 Caddy 反代（配置见 `deploy/Caddyfile.example`，其中 `/healthz` 对外返回 404）。示例里的 `command` 带 `--no-schedule`，核对时区与保存的计划后再删掉这一项。
+
+### systemd + 源码
+
+```bash
+sudo install -d -m 0700 -o relay -g relay /var/lib/relay-price
+sudo git clone https://github.com/ymting/api-relay-price.git /opt/relay-price/current
+sudo cp /opt/relay-price/current/deploy/relay-price.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable relay-price
+
+# 首次先初始化认证：--init-auth 也会取实例锁，所以要先把服务停着
+sudo systemctl stop relay-price
+sudo -u relay env RELAY_MODE=server RELAY_STATE_DIR=/var/lib/relay-price \
+  RELAY_ALLOWED_ORIGINS=https://relay.example.com RELAY_ALLOWED_HOSTS=relay.example.com \
+  /usr/bin/python3 /opt/relay-price/current/server.py --init-auth
+sudo systemctl start relay-price
+```
+
+`RestartPreventExitStatus=2` 是必需的：退出码 2 表示状态目录已被另一个实例锁定，重启也不会成功。
+
+### 环境变量
+
+`server` 模式缺任意一项必需变量都会拒绝启动，不会悄悄退回代码目录：
 
 | 变量 | 示例 | 说明 |
 | --- | --- | --- |
@@ -380,46 +433,27 @@ Windows 双击 `启动服务.bat` 的用法不变：不设置 `RELAY_MODE` 时�
 | `RELAY_HOST` / `RELAY_PORT` | `0.0.0.0` / `8765` | 容器内监听地址与端口 |
 | `RELAY_AUTH_DEFAULT_ENABLED` | `1` | 仅首次没有 `auth.json` 时生效 |
 
-可选：`RELAY_TRUSTED_PROXIES`（仅这些 TCP 对端可提供 `X-Forwarded-For`）、
+可选：`RELAY_TRUSTED_PROXIES`（只有这些 TCP 对端可以提供 `X-Forwarded-For`，精确 IP，不支持网段）、
 `RELAY_STRICT_PORT`（默认 1）、`RELAY_VERSION_KEEP` / `RELAY_VERSION_KEEP_DAYS`（配置归档保留，默认 30 / 30）、
 `RELAY_LOCAL_ALLOW_NULL_ORIGIN=1`（仅本地模式临时回退，`server` 忽略）。
 
-**Docker Compose（推荐）**
+`local` 模式不接受 `RELAY_ALLOWED_ORIGINS`、`RELAY_ALLOWED_HOSTS`、`RELAY_STRICT_PORT`，设了会直接报错 —— 这是防止本机模式被误配成对外开放。
 
-```bash
-sudo install -d -m 0700 -o 10001 -g 10001 /var/lib/relay-price
-sudo install -d -m 0755 /etc/relay-price
-sudo cp compose.example.yaml /etc/relay-price/compose.yaml   # 改镜像、域名与目录
-cd /etc/relay-price
-sudo docker compose pull
-sudo docker compose run --rm --no-deps app python -X utf8 server.py --init-auth
-sudo docker compose up -d
-curl --noproxy '*' --fail http://127.0.0.1:8765/healthz
-```
-
-`--init-auth` 只写认证文件，不监听端口也不启动调度；首次上线示例命令带 `--no-schedule`，
-核对时区与保存的计划后再删掉它。业务端口只发布到 `127.0.0.1`，HTTPS 由宿主 Caddy 反代
-（见 `deploy/Caddyfile.example`，其中 `/healthz` 对外返回 404）。
-
-**systemd 原生部署**
-
-把代码放到 `/opt/relay-price/releases/<version>` 并用 `current` 指向它，`deploy/relay-price.service`
-里的环境变量按实际域名修改。`RestartPreventExitStatus=2` 是必需的：退出码 2 表示状态目录已被
-另一个实例锁定，重启也不会成功。
-
-**访问保护**
+### 访问保护
 
 服务器模式默认要求登录（单账号）。`/login`、`/login.js`、`/healthz`、`/api/ping`、
 `/api/auth/challenge`、`/api/auth/login` 是匿名入口；其余业务接口与 `/data/*` 在未登录时返回 401，
 `/` 跳转 `/login`。会话 Cookie 为 `relay_session`（`HttpOnly; SameSite=Strict`），
 全部来源都是 https 时才加 `Secure`。写请求除 Origin 外还要带 `X-Relay-CSRF`。
 
-**健康检查与停机**
+`RELAY_ALLOWED_ORIGINS` 必须与访问协议一致：用 `http` 访问却把来源写成 `https://`（或反之），登录后会立刻被打回 `/login`。
 
-`GET /healthz` 只探测状态目录可写，不读快照、不发站点请求。`SIGTERM`/`SIGINT` 后先停止任务与调度，
-45 秒预算内收尾；超时保留 journal 中未确认的写操作，**不会重放**。容器 `stop_grace_period` 设为 60 秒。
+### 健康检查与停机
 
-**部署自检**
+`GET /healthz` 只探测状态目录可写，不读快照、不发站点请求，返回 `{"ok": ..., "version": ...}`；目录不可写时返回 503。
+收到 `SIGTERM` / `SIGINT` 后先停止任务与调度，45 秒预算内收尾；超时保留 journal 中未确认的写操作，**不会重放**。容器 `stop_grace_period` 设为 60 秒，不要调小。
+
+### 部署自检
 
 ```powershell
 $env:PYTHONUTF8 = "1"
