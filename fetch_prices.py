@@ -1207,13 +1207,27 @@ def load_settings() -> dict:
 
 
 def load_config(path: Path | None = None) -> dict:
-    """读取站点清单；缺失时给出可操作的提示。"""
+    """读取站点清单；主文件损坏时回退 .bak 与 ``*.versions/``，全都读不到才报错。
+
+    站点清单里是凭据，重配成本最高。与 load_settings 的回退策略保持一致：
+    宁可读一份旧版本，也不要因为一次坏写入让整份站点配置变成空列表。
+    """
     path = Path(path) if path is not None else DEFAULT_CONFIG
-    if not path.exists():
+    backup = path.with_suffix(path.suffix + ".bak")
+    if not path.exists() and not backup.exists():
         raise SystemExit(
             f"找不到配置文件 {path}\n请复制 {EXAMPLE_CONFIG.name} 为 {path.name} 并填入站点信息。"
         )
-    return load_json(path, default={"sites": []})
+    from integrations.configuration import read_json_with_backup
+    value, source = read_json_with_backup(path, None)
+    if not isinstance(value, dict) or not isinstance(value.get("sites"), list):
+        raise SystemExit(
+            f"配置文件 {path} 无法解析\n"
+            f"可尝试同目录的 {backup.name} 或 {path.name}.versions/ 里的备份。"
+        )
+    if source != path:
+        print(f"  ! {path.name} 读取失败，已回退到 {source.name}")
+    return value
 
 
 def get_target_sites(config: dict, only: str = "") -> list[dict]:

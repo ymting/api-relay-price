@@ -55,6 +55,7 @@ from integrations.configuration import (ConfigurationStore, DEFAULT_PROXY_MODE, 
 from integrations.contracts import ConnectionMode, ConnectionPolicy, ErrorCategory, Feature
 from integrations import service as integration_service
 from integrations import cindy as cindy_link
+from integrations import config_backup
 from integrations.retirement import EvidenceMatrix, build_report as build_retirement_report
 from integrations.auth import (AuthConfigError, AuthState, AuthStore, ChallengeStore, LoginLimiter,
                                SessionStore, cookie_header, expired_cookie_header, parse_cookie)
@@ -928,6 +929,124 @@ def find_site(site_id: str) -> dict | None:
         if site.get("id") == site_id:
             return site
     return None
+
+
+# ---------------------------------------------------------------------------
+# 配置备份与还原
+# ---------------------------------------------------------------------------
+
+# 导出/导入都走 POST：导出内含明文凭据，不该被 GET 链接、浏览器历史或反代日志顺手带走；
+# 导入本身就是写操作，天然需要 CSRF 与 Origin 校验。
+
+def export_config(body: dict) -> tuple[dict, int]:
+    """打包当前站点与偏好设置，返回给前端另存为 JSON。
+
+    凭据默认带上——不含凭据的备份还原后还得重配一遍，等于没备份。
+    """
+    include_secrets = body.get("include_secrets") is not False
+    include_auth = body.get("include_auth") is True
+    sites = load_sites()
+    settings = ensure_settings()
+
+    auth_payload = None
+    if include_auth:
+        state = AUTH.load()
+        auth_payload = {"enabled": state.enabled, "username": state.username,
+                        "password_hash": state.password_hash,
+                        "auth_revision": state.auth_revision}
+
+    payload = config_backup.build_export(sites, settings, app_version=VERSION,
+                                        include_secrets=include_secrets,
+                                        auth=auth_payload)
+    log_line("config", f"导出配置：{len(sites)} 个站点，凭据={'含' if include_secrets else '不含'}"
+                       f"，访问保护={'含' if include_auth else '不含'}")
+    return {"ok": True, "payload": payload,
+            "filename": config_backup.export_filename()}, 200
+
+
+def import_config(body: dict) -> tuple[dict, int]:
+    """还原配置：整体替换站点与偏好，可选连访问保护一起还原。
+
+    dry_run 只做校验并回摘要，供前端在真正写入前让用户确认。
+    """
+    payload = body.get("payload")
+    options = body.get("options") or {}
+    if not isinstance(options, dict):
+        return {"ok": False, "error": "导入选项格式不正确"}, 400
+    dry_run = options.get("dry_run") is True
+    restore_auth = options.get("restore_auth") is True
+
+    try:
+        plan = config_backup.plan_restore(payload, sanitize_settings=sanitize_settings,
+                                          restore_auth=restore_auth)
+    except config_backup.BackupError as exc:
+        return {"ok": False, "error": str(exc)}, 400
+
+    summary = plan.summary()
+    if dry_run:
+        return {"ok": True, "dry_run": True, **summary,
+                "message": f"备份可用，将还原 {summary['site_count']} 个站点"}, 200
+
+    # 访问保护先落盘再还原站点：哈希不合法时整体失败，不会出现「站点换了、密码没换」。
+    # 落盘前先快照旧字节，站点写入失败时按原样写回。
+    auth_state = None
+    previous_auth: bytes | None = None
+    if plan.restore_auth and plan.auth is not None:
+        candidate = AuthState(bool(plan.auth.get("enabled")),
+                              str(plan.auth.get("username") or ""),
+                              str(plan.auth.get("password_hash") or ""),
+                              int(plan.auth.get("auth_revision") or 1))
+        if candidate.enabled and not candidate.configured:
+            return {"ok": False, "error": "备份里的访问保护已开启但没有有效密码，配置未改动"}, 400
+        if candidate.password_hash:
+            try:
+                previous_auth = AUTH.path.read_bytes()
+            except FileNotFoundError:
+                previous_auth = None
+            except OSError as exc:
+                return {"ok": False, "error": f"读取现有访问保护配置失败：{exc}"}, 400
+            try:
+                AUTH.save(candidate)   # save 内部会校验哈希格式
+            except (AuthConfigError, ValueError, OSError) as exc:
+                return {"ok": False, "error": f"访问保护还原失败，配置未改动：{exc}"}, 400
+            auth_state = candidate
+
+    try:
+        result = config_backup.apply_restore(plan, sites_path=collector.DEFAULT_CONFIG,
+                                             settings_path=collector.SETTINGS_FILE)
+    except config_backup.BackupError as exc:
+        # 站点/设置没写成时把刚写的访问保护也撤回去，避免只还原了密码
+        if auth_state is not None:
+            try:
+                if previous_auth is None:
+                    AUTH.path.unlink(missing_ok=True)
+                else:
+                    AUTH.path.write_bytes(previous_auth)
+            except OSError:
+                log_line("config", "访问保护回滚失败，请手工检查 auth.json")
+        return {"ok": False, "error": str(exc)}, 400
+
+    # 配置换了一整套：运行时缓存、令牌会话、定时任务全部按新配置重建
+    for runtime in collector._INTEGRATION_RUNTIMES.values():
+        runtime.invalidate()
+    with TOKEN_SESSION_LOCK:
+        TOKEN_SESSIONS.clear()
+    if auth_state is not None:
+        # 密码哈希与 revision 都换了：旧会话一律作废，谁也不能拿老 cookie 继续用
+        SESSIONS.clear()
+    settings = ensure_settings()
+    SCHEDULER.apply_settings(settings)
+    CACHE.reload()
+
+    message = f"已还原 {result['sites']} 个站点与偏好设置"
+    if auth_state is not None:
+        message += "；访问保护密码已一并还原，请重新登录"
+    log_line("config", f"还原配置：{result['sites']} 个站点，"
+                       f"访问保护={'已还原' if auth_state is not None else '未改动'}")
+    return {"ok": True, "dry_run": False, **summary, "warnings": result["warnings"],
+            "auth_restored": auth_state is not None,
+            "requires_login": auth_state is not None and auth_state.enabled,
+            "message": message}, 200
 
 
 # ---------------------------------------------------------------------------
@@ -2088,6 +2207,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": False, "error": "该字段没有已保存的值"}, 404)
             log_line("config", f"显示站点凭据：{site.get('id')} / {field}")
             return self.send_json({"ok": True, "site": site.get("id"), "field": field, "value": value})
+
+        # 配置备份与还原：导出返回整份 JSON 由前端下载，导入整体替换站点与偏好
+        if path == "/api/config/export":
+            payload, status = export_config(body or {})
+            return self.send_json(payload, status)
+        if path == "/api/config/import":
+            payload, status = import_config(body or {})
+            return self.send_json(payload, status)
 
         if path == "/api/sites":
             cleaned, errors = ConfigurationStore(collector.DEFAULT_CONFIG).save(body.get("sites"))

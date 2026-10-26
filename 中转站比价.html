@@ -444,6 +444,9 @@ div.err{color:var(--red); font-size:12.5px; background:var(--red-soft); border:1
   border-radius:8px; padding:8px 11px; margin-bottom:10px; white-space:pre-wrap;}
 div.ok{color:var(--green); font-size:12.5px; background:var(--green-soft); border:1px solid #8fd0b0;
   border-radius:8px; padding:8px 11px; margin-bottom:10px;}
+/* 提醒（不是失败）：例如「这份备份不含凭据」，用琥珀色区别于 err 的红色 */
+div.warn{color:var(--amber); font-size:12.5px; background:var(--amber-soft); border:1px solid #f0d9b0;
+  border-radius:8px; padding:8px 11px; margin-bottom:10px;}
 .row-between{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
 .row-between .spacer{margin-left:auto;}
 /* 字段标签右侧的一小组按钮（显示 / 清空），别让它们撑高行高 */
@@ -2921,6 +2924,7 @@ function openSystemSettings(section='general'){
   const sections = [
     ['general','通用设置',openGeneralSettings], ['sites','站点设置',openSiteConfig],
     ['schedule','定时设置',openSettings], ['auth','访问保护',openAuthSettings],
+    ['backup','备份还原',openBackupSettings],
     ['logs','运行日志',openLogModal],
   ];
   if (!systemSettingsView || !document.getElementById('systemSettingsPanels')){
@@ -3681,6 +3685,190 @@ function bindSiteCards(list, sites, credMode, render, saveSite){
    日志：采集 / 刷新 / 定时都写进 logs/YYYY-MM-DD.log，这里实时追加显示
    ========================================================================== */
 const LOG_STATE = {date: '', since: 0, timer: null, live: true, filter: ''};
+
+/* ==========================================================================
+   配置备份还原
+   --------------------------------------------------------------------------
+   导出与导入都走 POST：导出文件里可能有明文凭据，不该被 GET 链接、浏览器历史
+   或反代日志顺手带走；导入本身是写操作，必须走 CSRF 与 Origin 校验。
+   面板切走再回来 DOM 会保留，但摘要靠 backupDraft 重建，避免"文件还在、按钮却灰了"。
+   ========================================================================== */
+let backupDraft = {payload: null, summary: null, name: ''};
+
+function backupResetDraft(){
+  backupDraft = {payload: null, summary: null, name: ''};
+  const preview = document.getElementById('backupPreview');
+  if (preview) preview.innerHTML = '';
+  const btn = document.getElementById('backupImportBtn');
+  if (btn) btn.disabled = true;
+}
+
+/** 把预检结果摊成几行摘要；站点 id 太多时只列前几个。 */
+function backupSummaryHtml(summary){
+  const ids = Array.isArray(summary.site_ids) ? summary.site_ids.filter(Boolean) : [];
+  const shown = ids.slice(0, 6).join('、') + (ids.length > 6 ? ` 等 ${ids.length} 个` : '');
+  const rows = [
+    ['站点数量', String(summary.site_count)],
+    ['站点标识', shown || '（备份里没有站点）'],
+    ['导出时间', summary.exported_at || '未标注'],
+    ['导出时版本', summary.app_version || '未标注'],
+  ];
+  const table = rows.map(([label, value]) =>
+    `<div class="hint" style="margin:2px 0;"><b>${escapeHtml(label)}</b>：${escapeHtml(value)}</div>`).join('');
+  const warnings = (summary.warnings || []).map(item =>
+    `<div class="warn" style="margin-top:6px;">${escapeHtml(item)}</div>`).join('');
+  return `<div class="form-card" style="margin-top:10px;">${table}${warnings}</div>`;
+}
+
+function openBackupSettings(){
+  const auth = (state.server && state.server.auth) || {};
+  openSide('备份还原', '导出配置另存为文件，或从备份文件整体还原', `
+    <div id="backupMsg" role="status"></div>
+    <div class="form-card">
+      <p class="section-title">导出配置</p>
+      <p class="hint">导出「站点设置 + 通用设置」为一个 JSON 文件。换机器、重装、Docker 与源码互迁都靠它。</p>
+      <label class="switch"><input type="checkbox" id="backupIncludeSecrets" checked> 包含站点凭据（Cookie / 密码 / 管理令牌 / 模型 Key）</label>
+      <div class="hint">关掉后导出的文件不含任何明文，可以放心分享；代价是还原时各站点凭据要重新填写。</div>
+      <label class="switch" style="margin-top:8px;"><input type="checkbox" id="backupIncludeAuth"${auth.enabled ? '' : ' disabled'}> 包含访问保护（用户名与密码哈希）</label>
+      <div class="hint">${auth.enabled ? '勾选后，还原时连登录密码一起恢复，并在还原后要求重新登录。' : '当前没有开启访问保护，这一项无内容可导出。'}</div>
+      <div class="row-between" style="margin-top:12px;"><span class="spacer"></span>
+        <button class="btn btn-primary" id="backupExportBtn">导出配置文件</button></div>
+    </div>
+    <div class="form-card" style="margin-top:14px;">
+      <p class="section-title">从备份还原</p>
+      <p class="hint">还原是<b>整体替换</b>：备份里的站点与设置会覆盖当前配置，备份里没有的站点会被删除。还原前当前配置会自动归档到 <code>sites.json.versions/</code> 与 <code>settings.json.versions/</code>，真出问题还能手工找回。</p>
+      <div class="field"><label for="backupFile">选择备份文件</label>
+        <input type="file" id="backupFile" accept="application/json,.json"></div>
+      <div id="backupPreview">${backupDraft.summary ? backupSummaryHtml(backupDraft.summary) : ''}</div>
+      <label class="switch" style="margin-top:10px;"><input type="checkbox" id="backupRestoreAuth"> 同时还原访问保护</label>
+      <div class="hint">只有备份里带了访问保护才生效；还原后当前登录会立即失效。</div>
+      <div class="row-between" style="margin-top:12px;"><span class="spacer"></span>
+        <button class="btn btn-primary" id="backupImportBtn"${backupDraft.summary ? '' : ' disabled'}>开始还原</button></div>
+    </div>`);
+
+  const msg = document.getElementById('backupMsg');
+  const fileInput = document.getElementById('backupFile');
+  const preview = document.getElementById('backupPreview');
+  const importBtn = document.getElementById('backupImportBtn');
+  const restoreAuthEl = document.getElementById('backupRestoreAuth');
+  if (backupDraft.summary) restoreAuthEl.checked = Boolean(backupDraft.summary.has_auth);
+  const say = (html) => { msg.innerHTML = html; };
+
+  /* —— 导出：含明文时要二次确认，别让人点一下就把凭据写到下载目录 —— */
+  document.getElementById('backupExportBtn').addEventListener('click', e => {
+    if (!requireServer()) return;
+    // 事件对象在确认回调里已经失效，按钮引用必须现在就取好
+    const button = e.currentTarget;
+    const includeSecrets = document.getElementById('backupIncludeSecrets').checked;
+    const includeAuth = auth.enabled && document.getElementById('backupIncludeAuth').checked;
+    const run = async (button) => {
+      button.disabled = true;
+      try {
+        const res = await apiPost('/config/export', {include_secrets: includeSecrets, include_auth: includeAuth});
+        if (!res || !res.ok) throw new Error((res && res.error) || '导出失败');
+        const blob = new Blob([JSON.stringify(res.payload, null, 2)], {type: 'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = res.filename || 'relay-price-config.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        say(`<div class="ok">已导出 ${res.payload.site_count} 个站点${includeSecrets ? '（含明文凭据）' : '（不含凭据）'}，文件已开始下载。</div>`);
+      } catch (err) {
+        say(`<div class="err">${escapeHtml(err.message || '导出失败')}</div>`);
+      } finally {
+        button.disabled = false;
+      }
+    };
+    if (includeSecrets){
+      confirmDialog({
+        title: '导出的文件包含明文凭据',
+        body: `<p>导出的 JSON 里有各站点的 Cookie / 密码 / 管理令牌 / 模型 Key，任何拿到文件的人都能直接使用这些凭据。</p>
+               <p>请只放在自己可信的目录，不要通过聊天工具或网盘公开分享。</p>`,
+        okText: '知道了，导出',
+        danger: true,
+        onOk: () => run(button),
+      });
+    } else {
+      run(button);
+    }
+  });
+
+  /* —— 选文件：先在后端预检（dry_run），校验规则只有服务端一份 —— */
+  fileInput.addEventListener('change', async ev => {
+    const file = ev.target.files && ev.target.files[0];
+    backupResetDraft();
+    say('');
+    if (!file) return;
+    if (file.size > 4 * 1024 * 1024){
+      say('<div class="err">文件超过 4 MB，不是本工具的配置备份。</div>');
+      return;
+    }
+    let payload;
+    try {
+      payload = JSON.parse(await file.text());
+    } catch (err) {
+      say('<div class="err">文件不是有效的 JSON，可能已经损坏。</div>');
+      return;
+    }
+    try {
+      const res = await apiPost('/config/import', {payload, options: {dry_run: true}});
+      if (!res || !res.ok) throw new Error((res && res.error) || '备份文件不可用');
+      backupDraft = {payload, summary: res, name: file.name};
+      preview.innerHTML = backupSummaryHtml(res);
+      importBtn.disabled = false;
+      if (restoreAuthEl){
+        restoreAuthEl.disabled = !res.has_auth;
+        restoreAuthEl.checked = Boolean(res.has_auth);
+      }
+      say(`<div class="ok">${escapeHtml(file.name)}：备份可用。</div>`);
+    } catch (err) {
+      say(`<div class="err">${escapeHtml(err.message || '备份文件不可用')}</div>`);
+    }
+  });
+
+  /* —— 还原：整体替换，必须再确认一次 —— */
+  importBtn.addEventListener('click', e => {
+    if (!requireServer()) return;
+    if (!backupDraft.summary || !backupDraft.payload){
+      say('<div class="err">请先选择一个可用的备份文件。</div>');
+      return;
+    }
+    const summary = backupDraft.summary;
+    const restoreAuth = Boolean(restoreAuthEl && restoreAuthEl.checked && summary.has_auth);
+    const button = e.currentTarget;
+    confirmDialog({
+      title: '确认整体还原配置',
+      body: `<p>将用备份里的 <b>${summary.site_count} 个站点</b>替换当前全部站点，备份里没有的站点会被删除，通用设置同样会被覆盖。</p>
+             <p>导出时间：${escapeHtml(summary.exported_at || '未标注')}。当前配置会先归档到 <code>*.versions/</code>，可以手工找回。</p>
+             ${restoreAuth ? '<p><b>访问保护会一并还原，还原后需要重新登录。</b></p>' : ''}`,
+      okText: '确认还原',
+      danger: true,
+      onOk: async () => {
+        button.disabled = true;
+        say('<div class="hint">正在还原…</div>');
+        try {
+          const res = await apiPost('/config/import', {payload: backupDraft.payload,
+            options: {restore_auth: restoreAuth}});
+          if (!res || !res.ok) throw new Error((res && res.error) || '还原失败');
+          backupResetDraft();
+          say(`<div class="ok">${escapeHtml(res.message || '配置已还原')}</div>`);
+          if (res.requires_login){
+            setTimeout(() => { location.replace('/login'); }, 800);
+            return;
+          }
+          // 配置整套换了：站点卡片、设置项都要按新配置重算，直接重载最省事也最不容易错
+          setTimeout(() => { location.reload(); }, 1200);
+        } catch (err) {
+          say(`<div class="err">${escapeHtml(err.message || '还原失败')}</div>`);
+          button.disabled = false;
+        }
+      },
+    });
+  });
+}
 
 /* 访问保护：开启 / 修改密码 / 关闭。
    服务端要求任何修改都带当前密码（首次开启除外），成功后所有旧会话立即失效。 */

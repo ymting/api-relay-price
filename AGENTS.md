@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This local API relay comparison tool uses Python 3.10+ and the standard library, with no application build step. `server.py` serves the loopback API; `fetch_prices.py` collects prices. `integrations/` contains contracts, providers, routing, pricing, configuration, and CCS/Cindy exports. `中转站比价.html` holds the frontend markup, styles, and JavaScript. `tests/` contains backend, Node, and browser checks. `data/` stores generated snapshots; `logs/` stores runtime logs. Read `README.md` before changes.
+This local API relay comparison tool uses Python 3.10+ and the standard library, with no application build step. `server.py` serves the loopback API; `fetch_prices.py` collects prices. `integrations/` contains contracts, providers, routing, pricing, configuration, backup/restore (`config_backup`), and CCS/Cindy exports. `中转站比价.html` holds the frontend markup, styles, and JavaScript. `tests/` contains backend, Node, and browser checks. `data/` stores generated snapshots; `logs/` stores runtime logs. Read `README.md` before changes.
 
 ## Build, Test, and Development Commands
 

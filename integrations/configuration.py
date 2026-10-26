@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import threading
 import time
 import urllib.request
@@ -131,6 +132,37 @@ def read_json(path, default=None):
         return json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         return copy.deepcopy(default)
+
+
+# 同一进程只提示一次：配置回退是偶发事件，别让每请求都刷一行
+_FALLBACK_WARNED: set[str] = set()
+
+
+def read_json_with_backup(path, default=None):
+    """读配置文件，主文件解析失败时回退 .bak 与 ``*.versions/`` 里的最新几份。
+
+    站点清单里是凭据，重配成本最高。本机出现过配置文件被写成全零的情况，
+    所以这里宁可读一份旧版本，也不要让一次坏写入把整份配置悄悄变成空列表。
+    返回 ``(内容, 实际来源路径)``；来源与主文件不同说明发生了回退。
+    """
+    path = Path(path)
+    candidates = [path, path.with_suffix(path.suffix + ".bak")]
+    archive = path.parent / (path.name + ".versions")
+    try:
+        archived = sorted((item for item in archive.iterdir()
+                           if item.is_file() and item.suffix == ".json"),
+                          key=lambda item: item.stat().st_mtime, reverse=True)[:5]
+    except OSError:
+        archived = []
+    candidates.extend(archived)
+    for candidate in candidates:
+        try:
+            return json.loads(candidate.read_text(encoding="utf-8-sig")), candidate
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+    return copy.deepcopy(default), path
 
 
 def _version_policy() -> tuple[int, int]:
@@ -328,12 +360,26 @@ class ConfigurationStore:
     def __init__(self, path):
         self.path = Path(path)
 
+    def _read(self) -> dict:
+        """读配置；主文件坏了就用 .bak / 归档里的最新可用版本。
+
+        回退只提示一次（每进程），避免把日志刷满；真正修复要等下一次保存把内容写回去。
+        """
+        value, source = read_json_with_backup(self.path, {})
+        if source != self.path:
+            key = str(source)
+            if key not in _FALLBACK_WARNED:
+                _FALLBACK_WARNED.add(key)
+                print(f"  ! {self.path.name} 读取失败，已回退到 {source.name}",
+                      file=sys.stderr)
+        return value if isinstance(value, dict) else {}
+
     def sites(self):
-        return (read_json(self.path, {}) or {}).get("sites", [])
+        return self._read().get("sites", [])
 
     def migrate(self):
         with file_lock(self.path):
-            config = read_json(self.path, {}) or {}
+            config = self._read()
             if self.path.exists() and config.get("integration_schema_version") != 1:
                 for site in config.get("sites", []):
                     site.setdefault("_revision", uuid.uuid4().hex)
@@ -345,7 +391,7 @@ class ConfigurationStore:
 
     def save(self, raw_sites):
         with file_lock(self.path):
-            config = read_json(self.path, {}) or {}
+            config = self._read()
             sites, errors = merge_sites(raw_sites, config.get("sites", []))
             # A malformed card must never delete another saved card or its credentials.
             if errors:
@@ -356,7 +402,7 @@ class ConfigurationStore:
 
     def rotate(self, site, expected, replacement):
         with file_lock(self.path):
-            config = read_json(self.path, {}) or {}
+            config = self._read()
             current = next((s for s in config.get("sites", []) if s.get("id") == site.get("id")), None)
             if current is None or current.get("_revision") != site.get("_revision"):
                 return False
