@@ -1,6 +1,9 @@
-# 部署手册
+# 人类部署手册
 
-本文是完整部署手册。只想快速跑起来，看 README 的「部署」一节就够了。
+本文是**给人看的**完整部署手册。只想快速跑起来，看 [`README.md`](README.md) 的「部署」一节就够了。
+
+> 让 AI Agent 替你部署？把 [`AGENT-DEPLOY.md`](AGENT-DEPLOY.md) 丢给它，那份是机器可执行清单。
+> 两份文档的硬约束完全一致，区别只在表达方式：这份讲「为什么」，那份讲「照做、验证、失败就停」。
 
 > **最容易踩的坑先说**：容器化部署时如果开了访问保护（`RELAY_AUTH_DEFAULT_ENABLED=1`）却没有 `auth.json`，服务会**直接退出、退出码 1**，容器一直重启。必须先执行一次 `--init-auth` 生成密码，或者首次先把访问保护关掉。
 
@@ -37,7 +40,7 @@
 ### 2.3 镜像标签
 
 ```
-ghcr.io/ymting/api-relay-price:1.0.0        正式版，与 Release 一致（当前）
+ghcr.io/ymting/api-relay-price:1.0.1        正式版，与 Release 一致（以 Release 页最新为准）
 ghcr.io/ymting/api-relay-price:latest       最新正式版
 ghcr.io/ymting/api-relay-price:dev-latest   dev 分支最新构建，功能最新但不保证稳定
 ghcr.io/ymting/api-relay-price:sha-xxxxxxx  按提交，用于精确定位
@@ -100,6 +103,28 @@ printf '%s\n%s\n' "$RELAY_USER" "$RELAY_PASS" | \
 认证已开启但没有有效密码，请先执行：python server.py --init-auth
 ```
 
+**没开访问保护会怎样**
+
+| 模式 | 表现 |
+| --- | --- |
+| `server` | **拒绝启动**，退出码 1，控制台直接告诉你该执行哪条命令 |
+| `local` | 只监听 `127.0.0.1`，外部本来就访问不到；若手动把监听地址改成 `0.0.0.0`，同样拒绝启动 |
+| 被反代/内网穿透包出去且没开认证 | 来自回环之外的请求一律返回 403，提示里带开启方法 |
+
+确实打算让前面的反向代理负责鉴权，才设 `RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1` —— 前提是那一层真的开着。
+
+**认证开启后的机制**（排障时用得上）
+
+`/login`、`/login.js`、`/healthz`、`/api/ping`、`/api/auth/challenge`、`/api/auth/login` 是匿名入口；其余业务接口与 `/data/*` 未登录返回 401，`/` 跳转 `/login`。
+会话 Cookie 为 `relay_session`（`HttpOnly; SameSite=Strict`），全部来源都是 https 时才加 `Secure`，空闲 30 分钟或满 12 小时失效。写请求除 Origin 外还要带 `X-Relay-CSRF`。
+口令用 scrypt 派生后存 `auth.json`；登录要带一次性挑战，失败按来源 / 账号 / 全局三层限速并逐次退避，成功和失败都写进 `logs/`（失败行只有来源和用户名，不含密码）。
+
+`RELAY_ALLOWED_ORIGINS` 必须与访问协议一致：用 `http` 访问却把来源写成 `https://`（或反之），登录后会立刻被打回 `/login`。
+
+**服务已经在跑时怎么开关**
+
+浏览器打开服务 → 「系统设置 → 访问保护」，填用户名和新密码即可开启；改密码、关闭也在这里（都需要当前密码）。忘记密码只能停服务重跑 `--init-auth`。
+
 ### 3.3 启动
 
 ```bash
@@ -124,7 +149,7 @@ curl -s http://127.0.0.1:8765/healthz
 
 ```bash
 cd /etc/relay-price
-sudo sed -i 's|api-relay-price:1\.0\.0|api-relay-price:1.0.1|' compose.yaml
+sudo sed -i 's|api-relay-price:.*|api-relay-price:1.0.2|' compose.yaml   # 换成目标版本号
 sudo docker compose pull
 sudo docker compose up -d
 ```
@@ -265,7 +290,27 @@ docker compose start app
 
 迁移到新机器：按上面的方式装好，把这三个文件放进新机器的状态目录，`chown 10001:10001`，启动即可。`sites.json` 里若有站点专用代理，注意新机器是否能用同样的地址。
 
-## 八、排障
+## 八、健康检查、停机与部署自检
+
+### 8.1 健康检查
+
+`GET /healthz` 只探测状态目录可写，不读快照、不发站点请求，返回 `{"ok": ..., "version": ...}`；目录不可写时返回 503。`compose.example.yaml` 的 healthcheck 已显式禁用代理，避免环境变量把本机探活转发出去。
+
+### 8.2 停机
+
+收到 `SIGTERM` / `SIGINT` 后先停止任务与调度，在 **45 秒预算**内收尾；超时保留 journal 中未确认的写操作，**不会重放**。容器 `stop_grace_period` 设 60 秒、systemd `TimeoutStopSec` 不低于 45 秒，别调小 —— 砍掉会丢正在写的状态。
+
+### 8.3 部署自检
+
+```powershell
+$env:PYTHONUTF8 = "1"
+python -X utf8 tests/smoke_deploy.py --mode process   # 本机 / systemd
+python -X utf8 tests/smoke_deploy.py --mode docker    # 需要 Docker
+```
+
+冒烟只用合成配置（空站点、调度关闭），不访问任何站点。纯 Compose 部署的服务器上没有源码副本，跳过这步，用 8.1 的 `healthz` 加页面四步验收即可。
+
+## 九、排障
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
@@ -280,67 +325,13 @@ docker compose start app
 | 端口起不来，退出码 2 | 状态目录被另一个进程锁定 | `docker compose down` 或杀掉旧进程；`.lock` 里的 PID 已失效时会自动接管 |
 | 反代后拿到的客户端 IP 都是网关地址 | 没配 `RELAY_TRUSTED_PROXIES` | 设成反代源 IP（精确值） |
 
-## 九、给 AI Agent 的部署指令
+## 十、交给 AI Agent 跑
 
-这一节是机器可执行版。Agent 按顺序执行，**每一步失败就停下报错，不要跳步、不要自己发明参数**。
+想让 Agent 代劳的话，把 [`AGENT-DEPLOY.md`](AGENT-DEPLOY.md) 丢给它。那份文档把本文压缩成了可执行流程：
 
-### 9.1 前置检查
+前置检查 → 路径选择 → 无 TTY 的 `--init-auth` 写法 → 验收断言 → 失败判定表 → 回滚 → 交付汇报模板，
+并且明确写了「验证不通过就停下报错，不许跳步、不许自创参数」。
 
-```bash
-python3 --version            # 需要 3.10+（源码方式）
-docker --version && docker compose version   # 需要 Docker 24+ / Compose v2（容器方式）
-ss -ltnp | grep 8765         # 确认 8765 没被占用
-```
+人类这边只需要准备三样东西：**域名**、**访问保护账号密码**、**站点凭据**。
+前两个可以直接给 Agent；最后一个建议自己在页面上填，不必经过对话。
 
-### 9.2 Docker Compose 路径（推荐）
-
-```bash
-# 1. 目录（属主必须是 10001）
-sudo install -d -m 0700 -o 10001 -g 10001 /var/lib/relay-price
-
-# 2. 配置
-sudo mkdir -p /etc/relay-price
-sudo curl -fsSL https://raw.githubusercontent.com/ymting/api-relay-price/main/compose.example.yaml \
-  -o /etc/relay-price/compose.yaml
-# 或从源码仓库复制
-sudo sed -i 's/relay\.example\.com/<实际域名>/g' /etc/relay-price/compose.yaml
-
-# 3. 初始化认证（有终端用 -it；无 TTY 用 -T + --auth-stdin，从 stdin 读用户名和密码）
-cd /etc/relay-price && sudo docker compose run --rm -it app python server.py --init-auth
-
-# 4. 启动与验证
-sudo docker compose up -d
-sudo docker compose ps
-curl -fsS http://127.0.0.1:8765/healthz   # 期望 {"ok": true, "version": ...}
-```
-
-### 9.3 硬约束（不要违反）
-
-1. **不要把端口发布成 `0.0.0.0`**。业务端口只到回环，公网入口交给反代。要对外就必须同时配好 `RELAY_ALLOWED_ORIGINS` 与 `RELAY_ALLOWED_HOSTS`。
-2. **不要跳过 `--init-auth`**。服务器模式下没开访问保护，服务会以退出码 1 拒绝启动（比 1.0.2-3 及更早的版本严格）。
-3. **不要为了让服务起来就设 `RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1`**，除非前面确实有做过鉴权的反代或网关；它同时关掉启动拦截和外部来源拦截。
-4. **不要改小 `stop_grace_period`**。收尾写盘需要时间，砍掉会丢正在写的状态。
-5. **不要用 `:latest` 或 `:dev-latest` 做生产版本**。生产锁版本号或 digest。
-6. **不要直接编辑容器内的 `sites.json`**。它是状态目录里的文件，改宿主上的那一份。
-7. **不要把凭据写进 compose 文件或提交到 Git**。凭据只放 `sites.json`，该文件已被 `.gitignore` 排除。
-
-### 9.4 验收清单
-
-```bash
-curl -fsS http://127.0.0.1:8765/healthz                 # ok=true，version 与预期一致
-sudo docker compose logs --tail=50 app                   # 无 Traceback
-sudo stat -c '%U:%G %a' /var/lib/relay-price             # 10001:10001 700
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/login   # 200
-```
-
-浏览器打开站点，确认：能登录 → 站点列表非空 → 手动采集一次有数据 → 页面刷新后数据还在。
-
-### 9.5 出问题时
-
-按第九节的表格逐一对照。仍无解时收集：
-
-```bash
-sudo docker compose ps
-sudo docker compose logs --tail=200 app
-sudo docker compose config          # 确认环境变量真的生效了
-```

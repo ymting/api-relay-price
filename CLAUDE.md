@@ -21,7 +21,7 @@ Use `启动服务.bat` for normal operation with scheduling. `python -X utf8 fet
 
 ## Deployment
 
-Full manual: `DEPLOY.md` (Chinese). Its section 9 is a machine-executable checklist written for AI agents.
+Human manual: `DEPLOY.md` (Chinese). Machine-executable checklist for AI agents: `AGENT-DEPLOY.md`. Usage details: `USER-GUIDE.md`; development, tests and releases: `DEVELOP.md`.
 
 Three targets: Windows local (double-click `启动服务.bat`), Docker Compose (recommended for Linux servers), systemd + source. All three share one state directory (`sites.json`, `settings.json`, `auth.json`, `data/`, `logs/`); moving that directory is the whole migration.
 
