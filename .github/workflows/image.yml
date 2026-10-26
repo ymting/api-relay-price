@@ -86,6 +86,25 @@ jobs:
           PYTHONUTF8: "1"
         run: python -X utf8 tests/smoke_deploy.py --mode docker --image relay-price:smoke
 
+      # 记录体积，方便观察基础镜像升级或依赖变化带来的膨胀。
+      - name: 记录镜像体积
+        run: |
+          set -eu
+          SIZE="$(docker image inspect relay-price:smoke --format '{{.Size}}')"
+          MB="$(awk -v s="$SIZE" 'BEGIN{printf "%.1f", s/1024/1024}')"
+          echo "镜像未压缩体积：${MB} MB (${SIZE} bytes)"
+          {
+            echo "### 镜像体积"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 未压缩 | **${MB} MB** |"
+            echo "| 字节 | ${SIZE} |"
+            echo "| 版本 | ${VERSION_TAG} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          VERSION_TAG: ${{ steps.version.outputs.value }}
+
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
