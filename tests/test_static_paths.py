@@ -61,6 +61,26 @@ class StaticPathTests(unittest.TestCase):
         instance.send_file.assert_not_called()
         self.assertEqual(instance.send_json.call_args.args[1], 404)
 
+    def test_serves_favicon(self):
+        instance = self.get("/icon.svg")
+        instance.send_file.assert_called_once()
+        self.assertEqual(instance.send_file.call_args.args[0].name, "icon.svg")
+
+    def test_favicon_reachable_without_login(self):
+        """登录页和未登录的标签页都要能拿到图标，否则显示破图。"""
+        exempt = self.server.Handler._auth_exempt
+        self.assertTrue(exempt("/icon.svg"))
+        # 放行范围不能顺带把业务数据也放出去
+        self.assertFalse(exempt("/api/state"))
+
+    def test_page_and_login_page_reference_the_shipped_icon(self):
+        """页面引用的文件名必须真存在，改名时两边一起改。"""
+        root = Path(self.server.ROOT)
+        self.assertTrue((root / "icon.svg").is_file())
+        page = (root / "中转站比价.html").read_text(encoding="utf-8")
+        self.assertIn('type="image/svg+xml" href="icon.svg"', page)
+        self.assertIn('href="icon.svg"', self.server.LOGIN_HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

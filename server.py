@@ -78,6 +78,8 @@ except DeployConfigError as exc:
 DATA_DIR = DEPLOY.state_dir / "data"
 LOG_DIR = DEPLOY.state_dir / "logs"
 HTML_FILE = ROOT / "中转站比价.html"
+# 站点图标：页面用相对路径 icon.svg 引用，服务端按 /icon.svg 直出，两边是同一个文件
+ICON_FILE = ROOT / "icon.svg"
 # 账号快照（余额 / 用量 / 分组 Key）落地位置，和价格数据一样只放本地
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
 HEALTH_FILE = DATA_DIR / "health.json"
@@ -1463,6 +1465,7 @@ LOGIN_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>登录 · 中转站比价</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
 <style>
   :root{color-scheme:light dark;--bg:#f5f6f8;--panel:#fff;--text:#1a1d21;--muted:#5b6472;
         --border:#d3d8e0;--accent:#3457d5;--danger:#c0392b;}
@@ -1700,8 +1703,12 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _auth_exempt(path: str) -> bool:
-        """只放行登录必需资源和无业务数据的最小健康检查。"""
-        return path in {"/login", "/login.js", "/healthz", "/api/ping",
+        """只放行登录必需资源和无业务数据的最小健康检查。
+
+        /icon.svg 也在这儿：它是纯品牌图形，不含任何配置或业务数据，
+        缺了它登录页和未登录标签页会显示破图；登录页、书签图标都要能拿到。
+        """
+        return path in {"/login", "/login.js", "/icon.svg", "/healthz", "/api/ping",
                         "/api/auth/challenge", "/api/auth/login"}
 
     def _guard(self, write: bool = False) -> dict | None:
@@ -1774,6 +1781,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.write_response(page.encode("utf-8"), "text/html; charset=utf-8",
                                            extra_headers={"X-Relay-Version": VERSION})
             return self.send_json({"error": "找不到页面文件"}, 404)
+
+        if path == "/icon.svg":
+            if ICON_FILE.exists():
+                return self.send_file(ICON_FILE)
+            return self.send_json({"error": "文件不存在"}, 404)
 
         if path.startswith("/data/"):
             allowed_names = {"prices.json", "prices.js", "index.json", "accounts.json", "health.json"}

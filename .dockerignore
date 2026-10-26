@@ -6,6 +6,7 @@
 !fetch_prices.py
 !VERSION
 !中转站比价.html
+!icon.svg
 !sites.example.json
 !integrations/
 !integrations/**

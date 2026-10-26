@@ -22,6 +22,7 @@ WORKDIR /app
 COPY server.py fetch_prices.py VERSION ./
 COPY integrations/ ./integrations/
 COPY 中转站比价.html ./中转站比价.html
+COPY icon.svg ./icon.svg
 COPY sites.example.json ./sites.example.json
 
 USER 10001:10001
