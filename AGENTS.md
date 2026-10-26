@@ -29,7 +29,7 @@ Use `unittest`, synthetic responses, mocks, and temporary directories. Name Pyth
 
 ## Commit & Pull Request Guidelines
 
-History contains Chinese commit subjects only. Use concise Chinese commit subjects as well. Commit to `main`; verify the destination before pushing. PRs should describe behavior, relevant issues, checks performed, and screenshots for UI changes. Preserve unrelated working-tree edits.
+History contains Chinese commit subjects only. Use concise Chinese commit subjects as well. Commit day-to-day work to `dev`; `main` only receives fast-forward merges from `dev` at release time, and formal images are built only from published GitHub Releases. On `dev`, bump `VERSION` with `python bump_version.py --dev` before committing; run `--release` when preparing a release. Verify the destination before pushing. PRs should describe behavior, relevant issues, checks performed, and screenshots for UI changes. Preserve unrelated working-tree edits.
 
 ## Security & Agent Instructions
 

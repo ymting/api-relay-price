@@ -320,7 +320,47 @@ git log --oneline -10               # 查看最近十个版本
 
 源码、启动脚本、站点配置模板、测试与 README 纳入版本管理。账号配置、偏好、备份、环境变量、私钥、数据快照、日志、本机 `_` 前缀自检脚本，以及 `docs/`、`memory/` 两个本机目录由 `.gitignore` 排除。这些被排除的文件需要单独备份，Git 无法恢复其历史。
 
-开发在 `main` 上直接进行。正式发布使用 `v*` 标签，标签内容必须与 `VERSION` 一致，发布后由 CI 构建镜像；需要长期并行的实验性改动时才另开分支。每次完成并验证一项修改后提交，才会留下新的版本；Git 不会自动保存每次编辑。
+### 分支与发布流程
+
+`main` 只保留已发布的正式版本，日常改动全部在 `dev` 上完成。
+
+| 分支 | `VERSION` 形态 | 镜像标签 | 何时构建镜像 |
+| --- | --- | --- | --- |
+| `dev` | `1.0.1-1`、`1.0.1-2`……（生产版本的 patch +1，末尾 `-n` 递增） | `dev-latest`、版本号、`sha-xxxxxxx` | 每次推送 `dev` |
+| `main` | `1.0.1`（与发布标签一致，不带后缀） | `latest`、版本号、`sha-xxxxxxx` | 只在发布 Release 时 |
+
+**日常开发**
+
+```powershell
+python bump_version.py --dev     # 1.0.1-1 → 1.0.1-2，提交前跑一次
+git add -A
+git commit -m "说明本次修改"
+git push
+```
+
+推送 `dev` 后 CI 跑完整回归，镜像同时产出 `dev-latest`，可以直接拉来试。
+
+**正式发版**
+
+```powershell
+python bump_version.py --release  # 1.0.1-3 → 1.0.1
+git commit -am "发版 1.0.1"
+git checkout main
+git merge --ff-only dev           # main 只接受来自 dev 的快进合并
+git push
+gh release create v1.0.1 --target main --title "v1.0.1" --notes "变更说明"
+```
+
+只有发布 Release 才会构建正式镜像并打上 `latest`；`main` 的普通推送不产镜像。发版完成后回到 `dev` 推进下一轮：
+
+```powershell
+git checkout dev
+python bump_version.py --dev      # 1.0.1 → 1.0.2-1
+git commit -am "开始 1.0.2 开发"
+git push
+```
+
+版本号由 CI 把关：`dev` 的 `VERSION` 必须是 `X.Y.Z-n`；Release 标签必须与 `VERSION` 完全一致且不带后缀，并且标签所在提交必须在 `main` 上。每次完成并验证一项修改后提交，才会留下新的版本；Git 不会自动保存每次编辑。
 
 ## Linux / Docker 常驻部署
 
