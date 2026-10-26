@@ -1,8 +1,16 @@
-# 复制为 /etc/relay-price/compose.yaml 后替换镜像地址、域名与宿主机目录。
+# 复制为 /etc/relay-price/compose.yaml 后替换域名与宿主机目录。
 # 业务端口只发布到回环，公网入口由宿主 Caddy 反代。
+#
+# 首次部署前在宿主机执行（目录属主必须与容器内的 UID/GID 一致，否则启动即报权限错误）：
+#   sudo install -d -m 0700 -o 10001 -g 10001 /var/lib/relay-price
+#
+# 镜像仓库当前是私有的，拉取前需要登录（token 勾 read:packages 即可）：
+#   docker login ghcr.io -u <GitHub 用户名>
 services:
   app:
-    image: ghcr.io/owner/repo@sha256:REPLACE_WITH_VERIFIED_DIGEST
+    # 正式版用具体版本号，试用新版可用 :dev-latest。
+    # 生产建议锁 digest：docker pull 之后把 :1.0.0 换成 @sha256:<digest>，避免标签被重推后悄悄换内容。
+    image: ghcr.io/ymting/api-relay-price:1.0.0
     user: "10001:10001"
     init: true
     read_only: true
@@ -17,6 +25,9 @@ services:
       RELAY_AUTH_DEFAULT_ENABLED: "1"
       RELAY_ALLOWED_ORIGINS: https://relay.example.com
       RELAY_ALLOWED_HOSTS: relay.example.com,127.0.0.1:8765,localhost:8765
+      # 反代与容器不在同一网络时，容器看到的源 IP 是 docker 网关而不是真实客户端。
+      # 需要按真实 IP 记日志或限流再打开；只接受精确 IP，不支持网段：
+      # RELAY_TRUSTED_PROXIES: 172.17.0.1
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
