@@ -4,7 +4,9 @@
 # 首次部署前在宿主机执行（目录属主必须与容器内的 UID/GID 一致，否则启动即报权限错误）：
 #   sudo install -d -m 0700 -o 10001 -g 10001 /var/lib/relay-price
 #
-# 镜像仓库当前是私有的，拉取前需要登录（token 勾 read:packages 即可）：
+# 镜像已公开，可直接匿名拉取。万一报 401（本地残留旧凭据），清掉再拉：
+#   docker logout ghcr.io
+# 仍失败则登录一次，token 勾 read:packages：
 #   docker login ghcr.io -u <GitHub 用户名>
 services:
   app:
