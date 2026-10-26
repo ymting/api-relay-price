@@ -29,7 +29,7 @@ Use `unittest`, synthetic responses, mocks, and temporary directories. Name Pyth
 
 ## Commit & Pull Request Guidelines
 
-History currently contains one Chinese initialization commit, so no broader convention is established. Use concise Chinese commit subjects. Work on `dev`; verify the destination before pushing and promote production changes from `dev`. PRs should describe behavior, relevant issues, checks performed, and screenshots for UI changes. Preserve unrelated working-tree edits.
+History contains Chinese commit subjects only. Use concise Chinese commit subjects as well. Commit to `main`; verify the destination before pushing. PRs should describe behavior, relevant issues, checks performed, and screenshots for UI changes. Preserve unrelated working-tree edits.
 
 ## Security & Agent Instructions
 
