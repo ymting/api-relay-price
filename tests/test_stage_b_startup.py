@@ -1,5 +1,6 @@
 """独立进程启动旧服务，合成配置及回环 HTTP，不触发远端请求。"""
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -150,6 +151,36 @@ print(json.dumps({"proxy_saved":True}))
                                     capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), {"proxy_saved": True})
+
+
+class InitAuthStdinTests(unittest.TestCase):
+    """无 TTY 环境（容器 run -T / CI / 面板）只能用 --auth-stdin 初始化。"""
+
+    def _run(self, state_dir, stdin_text):
+        root = Path(__file__).resolve().parents[1]
+        env = {**os.environ, "RELAY_MODE": "server", "RELAY_STATE_DIR": str(state_dir),
+               "RELAY_ALLOWED_ORIGINS": "http://127.0.0.1:8795",
+               "RELAY_ALLOWED_HOSTS": "127.0.0.1:8795",
+               "RELAY_STRICT_PORT": "1", "PYTHONUTF8": "1"}
+        return subprocess.run([sys.executable, "-X", "utf8", "server.py",
+                               "--init-auth", "--auth-stdin"],
+                              cwd=root, env=env, input=stdin_text,
+                              capture_output=True, text=True, timeout=90)
+
+    def test_writes_enabled_auth_from_two_lines(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._run(temp, "admin\npw-123456\n")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            raw = json.loads((Path(temp) / "auth.json").read_text(encoding="utf-8"))
+            self.assertTrue(raw["enabled"])
+            self.assertEqual(raw["username"], "admin")
+            self.assertTrue(raw["password_hash"].startswith("scrypt$v1$"))
+
+    def test_rejects_short_password_without_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._run(temp, "admin\nshort\n")
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse((Path(temp) / "auth.json").exists())
 
 
 if __name__ == "__main__":

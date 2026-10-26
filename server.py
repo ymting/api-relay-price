@@ -60,8 +60,9 @@ from integrations.retirement import EvidenceMatrix, build_report as build_retire
 from integrations.auth import (AuthConfigError, AuthState, AuthStore, ChallengeStore, LoginLimiter,
                                SessionStore, cookie_header, expired_cookie_header, parse_cookie)
 from integrations.deploy_config import DeployConfigError, load_deploy_config
-from integrations.request_guard import (GuardError, check_host, check_write_origin,
-                                        client_address, cors_allow_origin, parse_json_body)
+from integrations.request_guard import (GuardError, check_host, check_remote_without_auth,
+                                        check_write_origin, client_address, cors_allow_origin,
+                                        parse_json_body, startup_auth_problem)
 from integrations.state_lock import LockConflict, StateLock
 from integrations.version import read_version
 
@@ -1584,6 +1585,13 @@ class Handler(BaseHTTPRequestHandler):
         except (AttributeError, IndexError, TypeError, ValueError):
             return int(DEPLOY.port or 8765)
 
+    def _peer_ip(self) -> str:
+        """TCP 对端地址（不看 X-Forwarded-For，那个头可以伪造）。"""
+        try:
+            return str(self.client_address[0])
+        except (AttributeError, IndexError, TypeError):
+            return ""
+
     def _cors_headers(self) -> dict:
         origin = cors_allow_origin(self.headers.get("Origin"), self._bound_port(), DEPLOY)
         if not origin:
@@ -1697,7 +1705,7 @@ class Handler(BaseHTTPRequestHandler):
                         "/api/auth/challenge", "/api/auth/login"}
 
     def _guard(self, write: bool = False) -> dict | None:
-        """所有业务动作之前执行：Host → 认证 → Origin/CSRF → JSON。"""
+        """所有业务动作之前执行：Host → 外部来源 + 未认证 → 认证 → Origin/CSRF → JSON。"""
         port = self._bound_port()
         path = self._path_only(self.path)
         check_host(self.headers.get("Host", ""), port, DEPLOY)
@@ -1706,6 +1714,8 @@ class Handler(BaseHTTPRequestHandler):
         self._auth_state_cache = auth
         self._session_token = None
         self._session_record = None
+        # 没开访问保护时只认回环来源：防止 local 模式被反代/穿透暴露后整套配置裸奔
+        check_remote_without_auth(self._peer_ip(), auth.enabled, DEPLOY)
         if auth.enabled and not self._auth_exempt(path):
             token = parse_cookie(self.headers.get("Cookie"), SESSION_COOKIE)
             record = SESSIONS.get(token or "")
@@ -1931,6 +1941,10 @@ class Handler(BaseHTTPRequestHandler):
                                   429, {"Retry-After": str(wait)})
         if not username or not password or not AUTH.verify(username, password):
             retry = LOGIN_LIMITER.record_failure(ip, username)
+            # 只记来源与账号名（去换行、截断），绝不记密码；被爆破时日志里要看得见
+            safe_user = " ".join(username.split())[:64] or "（空）"
+            log_line("auth", f"登录失败：{ip} / {safe_user}"
+                             f"{f'，冷却 {retry}s' if retry else ''}")
             headers = {"Retry-After": str(retry)} if retry else None
             return self.send_json({"ok": False, "error": "用户名或密码错误"}, 401, headers)
 
@@ -1978,6 +1992,16 @@ class Handler(BaseHTTPRequestHandler):
         new_password = body.get("new_password")
         if new_password is not None and not isinstance(new_password, str):
             return self.send_json({"ok": False, "error": "新密码格式不正确"}, 400)
+        if not enabled:
+            # 点一下按钮就能让整套配置对外裸奔 —— 这里必须拦。
+            # 反代同机时请求对端恒为回环，运行期的来源检查看不出区别，所以要在关闭动作上判断。
+            problem = startup_auth_problem(DEPLOY, auth_enabled=False)
+            if problem:
+                return self.send_json({"ok": False, "error": (
+                    "当前是服务器模式（或监听在可被外部访问的地址），关闭访问保护会让任何人"
+                    "直接查看并修改站点配置与模型 Key。\n"
+                    "如果鉴权由前面的反向代理负责，请设置 "
+                    "RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1 并重启服务后再关闭。")}, 400)
         try:
             state = AUTH.change(str(body.get("current_password") or ""), enabled=enabled,
                                 username=username, new_password=new_password or None)
@@ -2319,13 +2343,38 @@ def _prepare_log_dir() -> bool:
         return True
 
 
-def _init_auth_cli() -> int:
-    """交互式初始化认证；不监听端口、不启动调度。"""
+def _init_auth_cli(*, from_stdin: bool = False) -> int:
+    """初始化访问保护；不监听端口、不启动调度。
+
+    from_stdin=True 时从标准输入读「用户名 / 密码」两行，供没有 TTY 的场景
+    （容器 `run -T`、CI、面板、AI Agent）使用 —— 交互式在那种环境里会直接卡死。
+    """
+    if from_stdin:
+        lines = [line.rstrip("\r\n") for line in sys.stdin]
+        username = (lines[0] if lines else "").strip()
+        password = lines[1] if len(lines) > 1 else ""
+        if not username or len(password) < 8:
+            print("标准输入需要两行：第一行用户名，第二行至少 8 位的密码")
+            return 1
+        try:
+            AUTH.set_initial(username, password, enabled=True)
+        except (AuthConfigError, ValueError) as exc:
+            print(f"初始化失败：{exc}")
+            return 1
+        print("访问保护已开启，请重启服务后使用登录页。")
+        return 0
+
     answer = input("是否开启访问保护（需要登录）？[Y/n] ").strip().lower()
     enabled = answer not in {"n", "no", "0"}
     if not enabled:
         AUTH.save(AuthState(False, "", "", 1))
         print("已关闭访问保护，并写入 auth.json。")
+        # server 模式 / 绑定到非回环地址时，下次启动会被拦住；这里先说清楚，
+        # 免得用户以为"初始化成功了"然后发现服务起不来。
+        if startup_auth_problem(DEPLOY, auth_enabled=False):
+            print("注意：当前是服务器模式（或监听在可被外部访问的地址），"
+                  "下次启动会因访问保护未开启而拒绝启动。")
+            print("要继续在无认证下对外服务，请设置 RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1。")
         return 0
     username = input("用户名：").strip()
     import getpass
@@ -2355,6 +2404,8 @@ def main() -> int:
     parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     parser.add_argument("--no-schedule", action="store_true", help="关闭每日定时")
     parser.add_argument("--init-auth", action="store_true", help="交互初始化访问保护后退出")
+    parser.add_argument("--auth-stdin", action="store_true",
+                        help="配合 --init-auth：从标准输入读用户名与密码（各一行），用于无 TTY 环境")
     args = parser.parse_args()
 
     if DEPLOY_ERROR is not None:
@@ -2369,7 +2420,7 @@ def main() -> int:
 
     try:
         if args.init_auth:
-            return _init_auth_cli()
+            return _init_auth_cli(from_stdin=args.auth_stdin)
 
         try:
             auth = AUTH.load()
@@ -2378,6 +2429,13 @@ def main() -> int:
             return 1
         if auth.enabled and not auth.configured:
             print("认证已开启但没有有效密码，请先执行：python server.py --init-auth")
+            return 1
+
+        # 没开访问保护却可能被外部访问（server 模式，或监听在非回环地址）时拒绝启动。
+        # 放在这里而不是请求里：配置错了应该在启动那一刻就停下，而不是等着被人发现。
+        problem = startup_auth_problem(DEPLOY, auth.enabled)
+        if problem:
+            print(problem)
             return 1
 
         if not _prepare_log_dir():

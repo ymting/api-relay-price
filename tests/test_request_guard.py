@@ -4,8 +4,9 @@ import json
 import unittest
 
 from integrations.deploy_config import load_deploy_config
-from integrations.request_guard import (GuardError, check_host, check_write_origin,
-                                        client_address, cors_allow_origin, parse_json_body)
+from integrations.request_guard import (GuardError, check_host, check_remote_without_auth,
+                                        check_write_origin, client_address, cors_allow_origin,
+                                        open_auth_hint, parse_json_body, startup_auth_problem)
 
 
 def config(mode="local", **env):
@@ -101,6 +102,70 @@ class JsonBodyTests(unittest.TestCase):
                 with self.assertRaises(GuardError):
                     parse_json_body(self.headers(**{"Content-Length": str(length)}),
                                     BytesIO(raw), 1024)
+
+
+class UnauthenticatedRemoteTests(unittest.TestCase):
+    """没开访问保护时，外部来源必须被挡住，且提示要能直接照抄执行。"""
+
+    def test_server_mode_refuses_to_start_without_auth(self):
+        problem = startup_auth_problem(config("server"), auth_enabled=False)
+        self.assertIsNotNone(problem)
+        self.assertIn("--init-auth", problem)
+
+    def test_server_mode_starts_when_auth_enabled(self):
+        self.assertIsNone(startup_auth_problem(config("server"), auth_enabled=True))
+
+    def test_local_starts_quietly_on_loopback(self):
+        for host in ("127.0.0.1", "localhost", "::1"):
+            with self.subTest(host=host):
+                self.assertIsNone(startup_auth_problem(config(RELAY_HOST=host),
+                                                       auth_enabled=False))
+
+    def test_local_refuses_to_start_when_bound_publicly(self):
+        for host in ("0.0.0.0", "::", "192.168.1.10"):
+            with self.subTest(host=host):
+                problem = startup_auth_problem(config(RELAY_HOST=host), auth_enabled=False)
+                self.assertIsNotNone(problem)
+                self.assertIn(host, problem)
+
+    def test_escape_hatch_allows_unauthenticated_remote(self):
+        cfg = config("server", RELAY_ALLOW_UNAUTHENTICATED_REMOTE="1")
+        self.assertIsNone(startup_auth_problem(cfg, auth_enabled=False))
+        check_remote_without_auth("203.0.113.9", auth_enabled=False, cfg=cfg)
+
+    def test_remote_peer_is_rejected_with_actionable_hint(self):
+        cfg = config()
+        with self.assertRaises(GuardError) as caught:
+            check_remote_without_auth("203.0.113.9", auth_enabled=False, cfg=cfg)
+        self.assertEqual(caught.exception.status, 403)
+        self.assertIn("访问保护", caught.exception.message)
+        # 服务在跑，提示要指向能立刻点进去的页面，而不是让人去抢实例锁
+        self.assertIn("系统设置 → 访问保护", caught.exception.message)
+
+    def test_loopback_peers_pass(self):
+        cfg = config()
+        for peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1", ""):
+            with self.subTest(peer=peer):
+                check_remote_without_auth(peer, auth_enabled=False, cfg=cfg)
+
+    def test_auth_enabled_lets_remote_through(self):
+        check_remote_without_auth("203.0.113.9", auth_enabled=True, cfg=config())
+
+    def test_hint_names_the_right_entry_point_per_mode(self):
+        # 运行时（服务在跑）→ 页面路径最短，不让人去敲会抢实例锁的 --init-auth
+        for cfg in (config(), config("server")):
+            hint = open_auth_hint(cfg)
+            self.assertIn("系统设置", hint)
+            self.assertNotIn("--init-auth", hint)
+        # 启动被拦（服务没起来）→ 只能给命令，说"打开浏览器"是废话
+        self.assertIn("docker compose run", open_auth_hint(config("server"), page_available=False))
+        self.assertIn("python server.py --init-auth", open_auth_hint(config(), page_available=False))
+
+    def test_startup_message_never_tells_user_to_open_a_page(self):
+        problem = startup_auth_problem(config("server"), auth_enabled=False)
+        self.assertNotIn("浏览器打开本服务", problem)
+        self.assertIn("docker compose run", problem)
+        self.assertIn("RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1", problem)
 
 
 class ClientAddressTests(unittest.TestCase):

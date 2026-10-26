@@ -94,6 +94,10 @@ class DeployConfig:
     allowed_hosts: tuple[str, ...]
     trusted_proxies: tuple[str, ...]
     allow_null_origin: bool
+    # 未开启访问保护时是否仍允许对外提供服务。默认 False：
+    # server 模式未开认证直接拒绝启动，local 模式收到非回环来源时返回 403。
+    # 只有在反代/网关已经做过鉴权时才应该打开。
+    allow_unauthenticated_remote: bool
     version_keep: int
     version_keep_days: int
 
@@ -167,6 +171,9 @@ def load_deploy_config(env=os.environ, root: str | Path | None = None) -> Deploy
                       name="RELAY_VERSION_KEEP", minimum=1)
     keep_days = _parse_int(env.get("RELAY_VERSION_KEEP_DAYS"), default=30,
                            name="RELAY_VERSION_KEEP_DAYS", minimum=1)
+    allow_unauth_remote = _parse_bool(env.get("RELAY_ALLOW_UNAUTHENTICATED_REMOTE"),
+                                      default=False,
+                                      name="RELAY_ALLOW_UNAUTHENTICATED_REMOTE")
 
     return DeployConfig(
         mode=mode,
@@ -178,6 +185,7 @@ def load_deploy_config(env=os.environ, root: str | Path | None = None) -> Deploy
         allowed_hosts=hosts,
         trusted_proxies=proxies,
         allow_null_origin=allow_null,
+        allow_unauthenticated_remote=allow_unauth_remote,
         version_keep=keep,
         version_keep_days=keep_days,
     )

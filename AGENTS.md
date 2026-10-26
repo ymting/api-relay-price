@@ -28,11 +28,12 @@ Three targets: Windows local (double-click `启动服务.bat`), Docker Compose (
 Hard constraints — do not violate these when deploying or editing deployment files:
 
 1. Never publish the business port on `0.0.0.0`. It binds `127.0.0.1` behind a reverse proxy; going public requires `RELAY_ALLOWED_ORIGINS` and `RELAY_ALLOWED_HOSTS` to match the real domain and scheme.
-2. Never skip `python server.py --init-auth`. With auth enabled and no `auth.json`, the process exits with code 1 and the container restart-loops.
-3. Never lower `stop_grace_period` / `TimeoutStopSec` below 45s — graceful shutdown needs that budget to finish writing state.
-4. Never use `:latest` or `:dev-latest` in production. Pin a version tag or a digest.
-5. Never edit `sites.json` inside a container; edit the host copy in the state directory.
-6. Never commit credentials, `auth.json`, or a filled `sites.json`.
+2. Never skip `python server.py --init-auth`. On `server` mode the process now refuses to start (exit code 1) while auth is disabled; with auth enabled but no `auth.json` it also exits with code 1. Both make the container restart-loop.
+3. Never set `RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1` just to make the service boot. It disables both the startup guard and the non-loopback request guard; only valid when a reverse proxy in front already authenticates requests.
+4. Never lower `stop_grace_period` / `TimeoutStopSec` below 45s — graceful shutdown needs that budget to finish writing state.
+5. Never use `:latest` or `:dev-latest` in production. Pin a version tag or a digest.
+6. Never edit `sites.json` inside a container; edit the host copy in the state directory.
+7. Never commit credentials, `auth.json`, or a filled `sites.json`.
 
 After any deployment change, run `python -X utf8 tests/smoke_deploy.py --mode process` (or `--mode docker` when Docker is available).
 

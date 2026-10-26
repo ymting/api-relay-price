@@ -454,10 +454,36 @@ sudo systemctl start relay-price
 
 ### 访问保护
 
-服务器模式默认要求登录（单账号）。`/login`、`/login.js`、`/healthz`、`/api/ping`、
-`/api/auth/challenge`、`/api/auth/login` 是匿名入口；其余业务接口与 `/data/*` 在未登录时返回 401，
-`/` 跳转 `/login`。会话 Cookie 为 `relay_session`（`HttpOnly; SameSite=Strict`），
-全部来源都是 https 时才加 `Secure`。写请求除 Origin 外还要带 `X-Relay-CSRF`。
+服务器模式默认要求登录（单账号）。**首次部署必须先初始化**，否则服务起不来。
+
+**怎么开启 / 关闭**
+
+| 场景 | 怎么做 |
+| --- | --- |
+| Docker 首次部署 | `cd /etc/relay-price && sudo docker compose run --rm -it app python server.py --init-auth`，按提示设用户名和至少 8 位密码（详见 `DEPLOY.md` 3.2） |
+| systemd / 源码首次部署 | 先停服务，再 `python server.py --init-auth`，跑完启动 |
+| 服务已经在跑 | 浏览器打开服务 →「系统设置 → 访问保护」→ 填用户名和新密码 → 开启 |
+| 想关掉 | 同一页点「关闭访问保护」，需要输入当前密码 |
+| 忘记密码 | 停服务后重跑 `--init-auth`，它会覆盖 `auth.json`，再启动 |
+
+`--init-auth` 是交互式的（Docker 里必须带 `-it`），它会写 `auth.json` 并取实例锁，所以服务在跑时要先停。
+没有终端（CI、面板、Agent 代跑）时带 `-it` 会直接卡住，改用 `-T` + `--auth-stdin` 从标准输入读用户名和密码，写法见 `DEPLOY.md` 3.2。
+
+**没开访问保护会怎样**
+
+- `server` 模式：**拒绝启动**，退出码 1，控制台直接告诉你该执行哪条命令。
+- `local` 模式：只监听 `127.0.0.1`，外部本来就访问不到；如果手动把监听地址改成 `0.0.0.0`，同样拒绝启动。
+- 万一服务被反代或内网穿透包出去，而访问保护又没开，来自回环之外的请求一律返回 403（提示里带开启方法）。
+- 确实打算让前面的反向代理负责鉴权，设 `RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1` 放行——前提是你确认反代那一层真的开着。
+
+**认证开启后的机制**
+
+`/login`、`/login.js`、`/healthz`、`/api/ping`、`/api/auth/challenge`、`/api/auth/login`
+是匿名入口；其余业务接口与 `/data/*` 在未登录时返回 401，`/` 跳转 `/login`。
+会话 Cookie 为 `relay_session`（`HttpOnly; SameSite=Strict`），全部来源都是 https 时才加 `Secure`，
+空闲 30 分钟或满 12 小时失效。写请求除 Origin 外还要带 `X-Relay-CSRF`。
+口令用 scrypt 派生后存 `auth.json`；登录要带一次性挑战，失败按来源 / 账号 / 全局三层限速并逐次退避，
+成功和失败都会写进 `logs/`（失败行只有来源和用户名，不含密码）。
 
 `RELAY_ALLOWED_ORIGINS` 必须与访问协议一致：用 `http` 访问却把来源写成 `https://`（或反之），登录后会立刻被打回 `/login`。
 
@@ -485,6 +511,7 @@ python -X utf8 tests/smoke_deploy.py --mode docker    # 需要 Docker
 - 导出到 CC Switch 时，**余额查询脚本按站点类型分别生成**：New API 站要有管理令牌（或账号密码登录拿到的令牌），Sub2API 站用模型 API Key 查 `/v1/usage`；Cookie 登录的 New API 站仍能导出，只是不带用量脚本（生成结果里会写明）。拿不到**已确认的单位与授权**时不硬凑脚本，宁可不带。
 - CC Switch 的 `apiFormat` 参数要 **4.0.10 以上**才认，版本低时页面会禁用这一项，避免生成一条被拒的链接。
 - 动态分档计费按表达式选择**短上下文那档**作展示基准（例如 `len >= 272000 ? 高价档 : 低价档` 取低价档），并把表达式原文留在数据里；表达式无法解释时显示为未知，不当成免费，也不参与最低价排名。
+- 访问保护是**单账号**，没有多用户、角色和两步验证；忘记密码只能停服务重跑 `--init-auth`。需要多人分权时应该放在带鉴权的反代后面，或者各开一个实例。
 
 ## 许可证
 

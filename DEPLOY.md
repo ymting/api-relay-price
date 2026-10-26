@@ -76,7 +76,23 @@ cd /etc/relay-price
 sudo docker compose run --rm -it app python server.py --init-auth
 ```
 
+没有终端（CI、面板、AI Agent 执行）时 `-it` 会直接卡住，改用 `-T` 从标准输入喂用户名和密码：
+
+```bash
+read -rsp '用户名: ' RELAY_USER; echo
+read -rsp '密码（至少 8 位）: ' RELAY_PASS; echo
+printf '%s\n%s\n' "$RELAY_USER" "$RELAY_PASS" | \
+  sudo docker compose run --rm -T app python server.py --init-auth --auth-stdin
+```
+
+用 `read -s` 而不是把密码写进命令行，密码才不会留在 shell 历史里。`--auth-stdin` 一定是「开启」，
+没有「不开启」这个选项 —— 服务器模式下不开认证本来就起不来。
+
 按提示选择是否开启访问保护、设置用户名和至少 8 位密码。**选「不开启」也会写入 `auth.json`**，效果等同 `RELAY_AUTH_DEFAULT_ENABLED=0`。
+
+> 从 1.0.2-4 起，**服务器模式下没开访问保护会直接拒绝启动**（退出码 1），提示里带着该执行的命令。所以这一步不是「建议」，是必须走完的：要么在这里开，要么确认反代已做鉴权并显式设置 `RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1`。
+
+服务已经跑起来之后想开或改密码，不用再回命令行：「系统设置 → 访问保护」可以直接开启、改用户名、改密码、关闭（都需要当前密码）。忘记密码只能停服务重跑 `--init-auth`，它会覆盖 `auth.json`。
 
 跳过这步直接 `up -d`，容器会反复重启，日志里是：
 
@@ -207,6 +223,7 @@ python -X utf8 server.py --open
 | `RELAY_ALLOWED_HOSTS` | — | 允许的 Host，**server 模式必填**，如 `relay.example.com,127.0.0.1:8765` |
 | `RELAY_TRUSTED_PROXIES` | 空 | 可信反代源 IP，逗号分隔，精确匹配 |
 | `RELAY_AUTH_DEFAULT_ENABLED` | server 下 `true` | 是否默认开启登录保护 |
+| `RELAY_ALLOW_UNAUTHENTICATED_REMOTE` | `false` | 未开访问保护时仍允许对外服务。仅当反向代理已做鉴权时才打开；打开后 server 模式不再拒绝启动、也不再拦截外部来源 |
 | `RELAY_VERSION_KEEP` | `30` | `*.versions/` 保留几个版本 |
 | `RELAY_VERSION_KEEP_DAYS` | `30` | `*.versions/` 保留多少天 |
 | `RELAY_LOCAL_ALLOW_NULL_ORIGIN` | `false` | 仅 local 模式，允许 `file://` 页面直连（默认禁止） |
@@ -252,6 +269,8 @@ docker compose start app
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
+| 启动报「访问保护未开启」并以退出码 1 退出 | 服务器模式没有开启登录保护 | 按提示执行 `--init-auth`；若反代已做鉴权，设 `RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1` |
+| 页面访问返回「当前未开启访问保护，已拒绝来自外部地址」 | local 模式被反代/穿透暴露且未开认证 | 开启访问保护，或确认真实链路后配置 `RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1` |
 | 容器反复重启，日志说「认证已开启但没有有效密码」 | 没跑 `--init-auth` | `docker compose run --rm -it app python server.py --init-auth` |
 | 启动报权限错误 | 宿主目录属主不是 10001 | `sudo chown -R 10001:10001 /var/lib/relay-price` |
 | `healthz` 返回 503 | 状态目录不可写 | 检查挂载、磁盘空间、SELinux/AppArmor |
@@ -286,7 +305,7 @@ sudo curl -fsSL https://raw.githubusercontent.com/ymting/api-relay-price/main/co
 # 或从源码仓库复制
 sudo sed -i 's/relay\.example\.com/<实际域名>/g' /etc/relay-price/compose.yaml
 
-# 3. 初始化认证（交互，必须 -it；无 TTY 时先选「不开启」再在页面里配）
+# 3. 初始化认证（有终端用 -it；无 TTY 用 -T + --auth-stdin，从 stdin 读用户名和密码）
 cd /etc/relay-price && sudo docker compose run --rm -it app python server.py --init-auth
 
 # 4. 启动与验证
@@ -298,11 +317,12 @@ curl -fsS http://127.0.0.1:8765/healthz   # 期望 {"ok": true, "version": ...}
 ### 9.3 硬约束（不要违反）
 
 1. **不要把端口发布成 `0.0.0.0`**。业务端口只到回环，公网入口交给反代。要对外就必须同时配好 `RELAY_ALLOWED_ORIGINS` 与 `RELAY_ALLOWED_HOSTS`。
-2. **不要跳过 `--init-auth`**。开了访问保护却没有密码，服务会以退出码 1 退出。
-3. **不要改小 `stop_grace_period`**。收尾写盘需要时间，砍掉会丢正在写的状态。
-4. **不要用 `:latest` 或 `:dev-latest` 做生产版本**。生产锁版本号或 digest。
-5. **不要直接编辑容器内的 `sites.json`**。它是状态目录里的文件，改宿主上的那一份。
-6. **不要把凭据写进 compose 文件或提交到 Git**。凭据只放 `sites.json`，该文件已被 `.gitignore` 排除。
+2. **不要跳过 `--init-auth`**。服务器模式下没开访问保护，服务会以退出码 1 拒绝启动（比 1.0.2-3 及更早的版本严格）。
+3. **不要为了让服务起来就设 `RELAY_ALLOW_UNAUTHENTICATED_REMOTE=1`**，除非前面确实有做过鉴权的反代或网关；它同时关掉启动拦截和外部来源拦截。
+4. **不要改小 `stop_grace_period`**。收尾写盘需要时间，砍掉会丢正在写的状态。
+5. **不要用 `:latest` 或 `:dev-latest` 做生产版本**。生产锁版本号或 digest。
+6. **不要直接编辑容器内的 `sites.json`**。它是状态目录里的文件，改宿主上的那一份。
+7. **不要把凭据写进 compose 文件或提交到 Git**。凭据只放 `sites.json`，该文件已被 `.gitignore` 排除。
 
 ### 9.4 验收清单
 
