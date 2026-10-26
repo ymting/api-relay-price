@@ -19,7 +19,7 @@ import urllib.request
 import uuid
 from urllib.parse import urlsplit
 
-from .contracts import SiteConnectionPolicy, ScopeSource
+from .contracts import SiteConnectionPolicy, ScopeSource, looks_like_secret_mask
 from .providers import Credentials
 
 SECRET_FIELDS = ("cookie", "password", "management_token", "access_token", "refresh_token", "model_api_key")
@@ -305,7 +305,8 @@ def merge_sites(raw_sites, previous, site_types=("newapi", "sub2api")):
                     changed |= bool(auth.get(key))
                     auth[key] = ""
                 elif action != "keep" and value:
-                    if not isinstance(value, str) or "*" in value or "…" in value or value == "[REDACTED]":
+                    # 只拒绝真正的掩码：真实密码/令牌里出现单个 '*' 是合法的
+                    if not isinstance(value, str) or looks_like_secret_mask(value):
                         raise ValueError("不能保存凭据掩码")
                     value = value.strip()
                     if key != "password" and any(c in value for c in "\r\n"):

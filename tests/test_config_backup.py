@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from integrations import config_backup as cb
 from integrations.configuration import ConfigurationStore, read_json_with_backup
+from integrations.contracts import looks_like_secret_mask
 
 
 SITE = {
@@ -203,6 +204,40 @@ class RestoreTests(unittest.TestCase):
         self.assertTrue(any("没有任何站点" in item for item in plan.warnings))
         cb.apply_restore(plan, sites_path=self.sites_path, settings_path=self.settings_path)
         self.assertEqual(json.loads(self.sites_path.read_text(encoding="utf-8"))["sites"], [])
+
+    def test_password_with_single_asterisk_restores(self):
+        """真实密码里可以有 '*'：早先"含星号即掩码"的判定会让整份备份无法还原。"""
+        site = dict(SITE, auth=dict(SITE["auth"], password="ir17tuQBxjnkR*"))
+        plan = cb.plan_restore(make_payload(sites=[site]),
+                               sanitize_settings=lambda value: value)
+        self.assertEqual(plan.sites[0]["auth"]["password"], "ir17tuQBxjnkR*")
+
+    def test_real_masks_are_still_rejected(self):
+        for mask in ("********", "sk-abc***wxyz", "[REDACTED]", "sk-abc…wxyz", "••••"):
+            with self.subTest(mask=mask):
+                site = dict(SITE, auth=dict(SITE["auth"], password=mask))
+                with self.assertRaises(cb.BackupError):
+                    cb.plan_restore(make_payload(sites=[site]))
+
+
+class SecretMaskTests(unittest.TestCase):
+    """掩码判定本身：单个星号是合法字符，只有真正的掩码形态才算掩码。"""
+
+    def test_single_asterisk_is_a_real_character(self):
+        for value in ("ir17tuQBxjnkR*", "p*a*s*s", "sk-*abc"):
+            with self.subTest(value=value):
+                self.assertFalse(looks_like_secret_mask(value))
+
+    def test_mask_shapes_are_detected(self):
+        for value in ("********", "sk-abc***wxyz", "[REDACTED]", "[redacted]",
+                      "sk-abc…wxyz", "•*•", "*"):
+            with self.subTest(value=value):
+                self.assertTrue(looks_like_secret_mask(value))
+
+    def test_blank_and_non_string_values(self):
+        for value in ("", "   ", None, 123, b"***"):
+            with self.subTest(value=value):
+                self.assertFalse(looks_like_secret_mask(value))
 
 
 class ReadFallbackTests(unittest.TestCase):

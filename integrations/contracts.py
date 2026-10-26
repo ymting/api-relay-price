@@ -234,6 +234,31 @@ _SECRET_FIELDS = frozenset({
 })
 
 
+# 界面掩码的典型形态：连续三个及以上星号（sk-abc***wxyz）、省略号、整串星点、[REDACTED]。
+# 不能一见星号就判死：真实密码里出现单个 '*' 完全合法（实测某站点密码就以 '*' 结尾），
+# 早先用 `"*" in value` 判定会把真实凭据当成掩码，导致配置保存与整份备份还原都被拒。
+_MASK_RUN = re.compile(r"\*{3,}")
+_MASK_SYMBOLS = frozenset("*•·")
+
+
+def looks_like_secret_mask(value: Any) -> bool:
+    """判断凭据值是否只是界面上的掩码占位，而不是真实凭据。
+
+    只认真正的掩码形态，业务代码里凡是"不许把掩码当凭据"的地方都调这里，
+    避免各处各自写一份"含星号即掩码"的粗糙判断。
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    if text.upper() == "[REDACTED]" or "…" in text:
+        return True
+    if _MASK_RUN.search(text):
+        return True
+    return set(text) <= _MASK_SYMBOLS
+
+
 def _snapshot_data(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: ("[REDACTED]" if key.lower().replace("-", "_") in _SECRET_FIELDS

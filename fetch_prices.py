@@ -59,6 +59,7 @@ from integrations.pricing import (FetchError, to_float, canonical_model_name,
                                   parse_tier_coefficients, parse_newapi_pricing,
                                   parse_sub2api_pricing, BRACKET_PREFIX)
 from integrations.providers import USER_AGENT, ACCEPT_LANGUAGE
+from integrations.contracts import looks_like_secret_mask
 
 if TYPE_CHECKING:      # 仅供类型注解；运行时按需导入，避免与新接入层互相循环导入
     from integrations.runtime import IntegrationRuntime
@@ -785,7 +786,7 @@ def get_newapi_token_key(site: dict, proxy: str = "", token_id: int | str | None
     key = str((payload.get("data") or {}).get("key") or "").strip()
     if not key:
         raise FetchError("站点没有返回明文 Key")
-    if "*" in key or "…" in key:
+    if looks_like_secret_mask(key):
         raise FetchError("站点返回的是 Key 掩码，无法复制或导入；请到站点查看完整 Key")
     # NewAPI 的明文接口通常返回数据库中的原始令牌，站点前端复制时补 sk-。
     # 在共同出口补齐，创建、复制已有 Key 和 CC Switch 导入使用同一完整值。

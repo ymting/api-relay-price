@@ -20,7 +20,8 @@ from typing import Protocol
 
 from .contracts import (AuthKind, ErrorCategory, ErrorInfo, Feature, FeatureResult, FeatureStatus,
                         OperationStatus, PermissionStatus, ProviderKind, ScopeSource, VisibilityScope,
-                        WRITE_FEATURES, check_newapi_permission, classify_response, utc_now)
+                        WRITE_FEATURES, check_newapi_permission, classify_response,
+                        looks_like_secret_mask, utc_now)
 from .pricing import FetchError, parse_newapi_pricing, parse_sub2api_pricing
 
 
@@ -97,7 +98,8 @@ def _secret(value):
     if not isinstance(value, str) or any(ch in value for ch in "\r\n"):
         raise ValueError("凭据必须为不含换行的字符串")
     value = value.strip()
-    if value and ("*" in value or "…" in value or value == "[REDACTED]"):
+    # 只有真正的掩码形态才拒绝；单个 '*' 属于合法密码字符
+    if value and looks_like_secret_mask(value):
         raise ValueError("不能把掩码作为凭据")
     return value
 
