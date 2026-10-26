@@ -1,0 +1,38 @@
+[Unit]
+Description=Relay Price Comparison
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+WorkingDirectory=/opt/relay-price/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUTF8=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TZ=Asia/Shanghai
+Environment=RELAY_MODE=server
+Environment=RELAY_HOST=127.0.0.1
+Environment=RELAY_PORT=8765
+Environment=RELAY_STRICT_PORT=1
+Environment=RELAY_STATE_DIR=/var/lib/relay-price
+Environment=RELAY_AUTH_DEFAULT_ENABLED=1
+Environment=RELAY_ALLOWED_ORIGINS=https://relay.example.com
+Environment=RELAY_ALLOWED_HOSTS=relay.example.com,127.0.0.1:8765,localhost:8765
+# 首次上线关闭调度；验收后移除 --no-schedule 并核对保存的设置。
+ExecStart=/usr/bin/python3 /opt/relay-price/current/server.py --port 8765 --no-schedule
+UMask=0077
+Restart=on-failure
+RestartSec=5
+# 退出码 2 表示状态目录已被另一个实例锁定，重启也无法恢复。
+RestartPreventExitStatus=2
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/relay-price
+
+[Install]
+WantedBy=multi-user.target

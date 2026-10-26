@@ -1,0 +1,25 @@
+{
+  "notes": "站点清单模板。复制为 sites.json 后按需修改，sites.json 已被 .gitignore 排除以避免泄露账号。auth.cookie 优先、auth.username/password 回落，只填需要的那一种即可：想看余额/用量/API Key 就至少要填一种凭据，只想看价格可以都留空。站点里的 proxy 是该站专用代理，留空则用 settings.json 的全局 proxy，都留空即直连。下面两站都是占位示例，默认停用，请改成自己的地址再启用。",
+  "proxy": "",
+  "cluster_threshold": 0.9,
+  "sites": [
+    {
+      "id": "example-newapi",
+      "name": "New API 示例站",
+      "base_url": "https://relay.example.com",
+      "type": "newapi",
+      "enabled": false,
+      "proxy": "",
+      "auth": { "cookie": "", "username": "", "password": "" }
+    },
+    {
+      "id": "example-sub2api",
+      "name": "Sub2API 示例站",
+      "base_url": "https://demo.sub2api.org",
+      "type": "sub2api",
+      "enabled": false,
+      "proxy": "",
+      "auth": { "cookie": "", "username": "", "password": "" }
+    }
+  ]
+}

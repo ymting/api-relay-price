@@ -1,0 +1,45 @@
+# 复制为 /etc/relay-price/compose.yaml 后替换镜像地址、域名与宿主机目录。
+# 业务端口只发布到回环，公网入口由宿主 Caddy 反代。
+services:
+  app:
+    image: ghcr.io/owner/repo@sha256:REPLACE_WITH_VERIFIED_DIGEST
+    user: "10001:10001"
+    init: true
+    read_only: true
+    environment:
+      PYTHONUTF8: "1"
+      TZ: Asia/Shanghai
+      RELAY_MODE: server
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: "8765"
+      RELAY_STRICT_PORT: "1"
+      RELAY_STATE_DIR: /var/lib/relay-price
+      RELAY_AUTH_DEFAULT_ENABLED: "1"
+      RELAY_ALLOWED_ORIGINS: https://relay.example.com
+      RELAY_ALLOWED_HOSTS: relay.example.com,127.0.0.1:8765,localhost:8765
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - /var/lib/relay-price:/var/lib/relay-price
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    # 首次上线先关闭调度；验收并核对保存的计划后删除这一行。
+    command: ["sh", "-c", "umask 0077; exec python -X utf8 server.py --port 8765 --no-schedule"]
+    healthcheck:
+      # 显式禁用代理，避免环境变量把本机探活转发出去。
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8765/healthz', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

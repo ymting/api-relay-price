@@ -1,0 +1,18 @@
+# 换行规范：仓库内统一存 LF，BAT 检出为 CRLF（cmd 对 LF 的 goto/label 处理不可靠）
+* text=auto
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源，禁止换行转换与文本 diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+
+# 许可证与版本文本保持原样，避免被改写
+LICENSE text
+VERSION text

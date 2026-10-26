@@ -1,0 +1,62 @@
+# Python 环境与虚拟环境
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 站点清单可能含账号密码，只提交模板 sites.example.json
+sites.json
+sites.json.bak
+# 本机偏好（定时、节流、常用模型），每人不同
+settings.json
+settings.json.bak
+# 写文件前自动留的上一版备份，同样可能含账号
+*.bak
+*.bak*
+sites.json.*
+settings.json.*
+!sites.example.json
+# 版本化备份目录（sites.json.versions/、settings.json.versions/）含站点凭据，绝不能进仓库
+*.versions/
+
+# 运行期认证、临时文件与实例锁
+auth.json*
+*.tmp
+*.lock
+.lock
+
+# 本机环境变量与凭据文件
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+
+# 本机开发期自检脚本，不进仓库
+_*
+
+# 抓取产物，随时可再生
+data/
+# 运行日志（含站点名与失败原因），只在本机看
+logs/
+
+# 说明性与计划类文档只在本机，不推送远端（按项目约定）
+docs/
+memory/
+
+# 本机诊断脚本（引用被忽略的 _ 前缀脚本，公开后必然失效，只留本机）
+diagnose_accounts.bat
+
+# 本机零散日志与工具缓存
+*.log
+.pytest_cache/
+node_modules/
+
+# 平台自身的工作目录
+.workbuddy/
+
+# 操作系统生成的文件
+.DS_Store
+Thumbs.db
+Desktop.ini

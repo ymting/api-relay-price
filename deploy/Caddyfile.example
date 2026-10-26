@@ -1,0 +1,10 @@
+# 公网入口只反代业务路径；内部探活不对外暴露。
+relay.example.com {
+    @internal_health path /healthz /healthz/*
+    handle @internal_health {
+        respond "Not Found" 404
+    }
+    handle {
+        reverse_proxy 127.0.0.1:8765
+    }
+}

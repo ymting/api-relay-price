@@ -1,0 +1,15 @@
+# 白名单：只把运行所需文件送进构建上下文，凭据、快照、日志与文档一律不复制。
+**
+!Dockerfile
+!.dockerignore
+!server.py
+!fetch_prices.py
+!VERSION
+!中转站比价.html
+!sites.example.json
+!integrations/
+!integrations/**
+**/__pycache__/
+**/*.pyc
+**/auth.json*
+**/*.versions/
