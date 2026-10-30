@@ -68,25 +68,43 @@ def _split_top_level(text: str, sep: str = ",") -> list[str]:
     return parts
 
 
+def _unwrap_expression(text: str) -> str:
+    text = text.strip()
+    while text.startswith("(") and text.endswith(")"):
+        depth = 0
+        for pos, ch in enumerate(text):
+            depth += (ch == "(") - (ch == ")")
+            if depth == 0:
+                break
+        if pos != len(text) - 1:
+            break
+        text = text[1:-1].strip()
+    return text
+
+
+def _default_service_tier_base(expr: str) -> str | None:
+    """仅识别未指定 service_tier 时倍率为 1 的完整顶层乘积。"""
+    factors = _split_top_level(_unwrap_expression(expr), "*")
+    if len(factors) < 2:
+        return None
+    condition = re.compile(
+        r'''param\s*\(\s*(["'])service_tier\1\s*\)\s*==\s*(["'])(?:priority|fast|ultrafast)\2\s*\?\s*'''
+        r'''([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*:\s*1(?:\.0+)?\s*'''
+    )
+    for part in factors[1:]:
+        match = condition.fullmatch(_unwrap_expression(part))
+        if not match or not math.isfinite(float(match[3])):
+            return None
+    # 不支持的表达式不可截取局部；基础式也必须由调用方完整解析。
+    return factors[0].strip()
+
+
 def parse_tier_coefficients(expr: str) -> dict | None:
     """只解析可证明在短上下文（len=p=0）生效的线性档位，不执行远端表达式。"""
-    if not expr:
+    if not isinstance(expr, str) or not expr or len(expr) > 100000:
         return None
-    if not isinstance(expr, str) or len(expr) > 100000:
-        return None
-
-    def unwrap(text):
-        text = text.strip()
-        while text.startswith("(") and text.endswith(")"):
-            depth = 0
-            for pos, ch in enumerate(text):
-                depth += (ch == "(") - (ch == ")")
-                if depth == 0:
-                    break
-            if pos != len(text) - 1:
-                break
-            text = text[1:-1].strip()
-        return text
+    unwrap = _unwrap_expression
+    expr = _default_service_tier_base(expr) or expr
 
     def select(text, level=0):
         if level > 32:
@@ -240,6 +258,11 @@ def parse_newapi_pricing(site: dict, payload: dict) -> dict:
                     offer["billing_expr"] = expr
                     offer["pricing_verified"] = bool(coeffs)
                     offer["pricing_basis"] = "len=0" if coeffs else "unknown_expression"
+                    base_expr = _default_service_tier_base(expr) if coeffs else None
+                    if base_expr:
+                        # 默认报价不包含 priority / fast / ultrafast 的附加倍率。
+                        offer["service_tier_basis"] = "unspecified"
+                        offer["billing_base_expr"] = base_expr
                     coeffs = coeffs or {}
                     offer["input"] = coeffs.get("input")
                     offer["output"] = coeffs.get("output")

@@ -95,6 +95,35 @@ class TierTests(unittest.TestCase):
         self.assertEqual((result["input"], result["output"]), (1, 5))
         self.assertEqual(result["pricing_basis"], "len=0")
 
+    def test_service_tier_default_prices_preserve_full_expression(self):
+        base = '((len < 272000) ? tier("base", p*2+c*10+cr*0.2) : tier("long", p*4+c*15))'
+        expr = (base + ' * (param("service_tier") == "priority" ? 2 : 1)'
+                + ' * (param("service_tier") == "fast" ? 2 : 1)'
+                + ' * (param("service_tier") == "ultrafast" ? 6 : 1)')
+        result = fp.NewApiAdapter(SITE, ScriptedClient([])).parse({"group_ratio": {"gpt_pro": .22}, "data": [{
+            "model_name": "fixture-model", "quota_type": 0, "billing_mode": "tiered_expr",
+            "billing_expr": expr, "enable_groups": ["gpt_pro"]}]})[0]
+        self.assertAlmostEqual(result["input"], .44)
+        self.assertAlmostEqual(result["output"], 2.2)
+        self.assertAlmostEqual(result["cache_read"], .044)
+        self.assertTrue(result["pricing_verified"])
+        self.assertEqual(result["service_tier_basis"], "unspecified")
+        self.assertEqual(result["billing_base_expr"], base)
+        self.assertEqual(result["billing_expr"], expr)
+
+    def test_unknown_service_tier_factors_do_not_guess(self):
+        base = '(tier("base", p*2+c*10))'
+        for factor in ('param("other") == "fast" ? 2 : 1',
+                       'param("service_tier") == "fast" ? 2 : 3',
+                       'param("service_tier") != "fast" ? 2 : 1',
+                       'param("service_tier") == "unknown" ? 2 : 1',
+                       'param("service_tier") == "fast" ? 1e999 : 1',
+                       'param("service_tier") == "fast" ? 2 : malicious()'):
+            with self.subTest(factor=factor):
+                self.assertIsNone(fp.parse_tier_coefficients(f'{base} * ({factor})'))
+        self.assertIsNone(fp.parse_tier_coefficients(
+            '(tier("base", p*c)) * (param("service_tier") == "fast" ? 2 : 1)'))
+
 
 class Sub2PriceTests(unittest.TestCase):
     def fetch(self, pricing=None, group=None, wrapped=False):

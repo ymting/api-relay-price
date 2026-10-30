@@ -73,6 +73,11 @@ check('待确认价格参与比价并标参考价，表达式说明正确转义'
   assert.ok(!html.includes('<unsafe>'));
   assert.ok(html.includes('&lt;unsafe&gt;'));
 });
+check('未知表达式不声称已按短上下文计算价格', () => {
+  const html = t.buildDetail({offers:[{...offer,input:null,output:null,pricing_basis:'unknown_expression'}],site_count:1});
+  assert.ok(html.includes('系统未能解析出确定价格'));
+  assert.ok(!html.includes('表内价格按短上下文'));
+});
 check('参考价与确认价格同场竞技，低价者得最低', () => {
   const html = t.buildDetail({offers:[offer,{...offer,site_name:'Confirmed',input:2,
     pricing_verified:true,dynamic:false}],site_count:1});
@@ -121,6 +126,20 @@ check('无档位信息时不出分档表', () => {
   assert.equal(t.offerTiersHtml({group_ratio: 1, billing_expr: 'hour("Asia/Shanghai") >= 9 ? tier("peak", p * 9) : tier("off_peak", p * 4.5)'}), '');
   assert.equal(t.offerTiersHtml({group_ratio: 1, pricing_intervals: [{tier_label: 'only', input_price: 1e-6}]}), '');
   assert.equal(t.offerTiersHtml({group_ratio: 1}), '');
+});
+check('服务等级表达式仅展示已验证的未指定等级分档', () => {
+  const base = 'len < 272000 ? tier("base", p * 2 + c * 10) : tier("long", p * 4 + c * 15)';
+  const raw = `(${base}) * (param("service_tier") == "priority" ? 2 : 1)`;
+  const priced = {...offer, pricing_verified:true, service_tier_basis:'unspecified',
+    billing_expr:raw, billing_base_expr:base, group_ratio:.22};
+  const html = t.buildDetail({offers:[priced],site_count:1});
+  assert.ok(html.includes('未指定服务等级'));
+  assert.ok(html.includes('表内价格按未指定 service_tier 计算'));
+  const tiers = t.offerTiersHtml(priced);
+  assert.ok(tiers.includes('未指定 service_tier 的计费表达式'));
+  assert.ok(tiers.includes('$0.44'));
+  assert.ok(tiers.includes('$0.88'));
+  assert.equal(t.offerTiersHtml({...priced,service_tier_basis:null}), '');
 });
 // —— 全局设置：分档价格表是否默认展开 ——
 const tierOffer = {group_ratio: 2, billing_expr: '((len <= 200000)) ? (tier("≤200K", p * 2 + c * 6)) : (tier("200k_plus", p * 4 + c * 12))'};

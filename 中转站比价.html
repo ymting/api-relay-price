@@ -1949,7 +1949,7 @@ function pricingPendingNote(o){
     return `站点开启动态计费${flags.length ? '：' + flags.join('、') : ''}。表内是底价，实际扣费会浮动，仅供参考。`;
   }
   if (o.pricing_basis === 'unknown_expression' || (o.dynamic && o.pricing_verified === false)) {
-    return '站点使用动态计费表达式（分时、按次或分档），系统未能解析出确定价格。表内价格按短上下文（len=0）换算，仅供参考。';
+    return '站点使用动态计费表达式（分时、按次或分档），系统未能解析出确定价格；显示的数值（如有）仅供参考。';
   }
   if (o.pricing_verified === false) {
     return '站点未提供完整的价格字段，价格仅供参考。';
@@ -2127,9 +2127,12 @@ function offerTiersHtml(o){
       per_call: it.per_request_price,
     }));
   } else if (o.billing_expr){
-    const parsed = parseBillingTiers(o.billing_expr);
+    // 服务端已严格校验并约简等级倍率时，分档按未指定 service_tier 的基础表达式展示。
+    const tierExpr = o.service_tier_basis === 'unspecified' && o.billing_base_expr
+      ? o.billing_base_expr : o.billing_expr;
+    const parsed = parseBillingTiers(tierExpr);
     if (parsed && parsed.kind === 'tiers' && parsed.tiers.length > 1){
-      source = '计费表达式解析';
+      source = o.service_tier_basis === 'unspecified' ? '未指定 service_tier 的计费表达式' : '计费表达式解析';
       rows = parsed.tiers.map(t => Object.assign({label: tierCondLabel(t.conds)}, t.coeffs || {}, {per_call: t.per_call}));
     }
   }
@@ -2352,6 +2355,8 @@ function offerKeyDetails(o, idx){
   const site = ((state.server || {}).sites || []).find(s => s.id === o.site) || state.siteMeta.find(s => s.id === o.site) || {};
   const enabled = site.enabled !== false;
   const pendingNote = pricingPendingNote(o);
+  const serviceTierNote = o.service_tier_basis === 'unspecified'
+    ? '表内价格按未指定 service_tier 计算；priority、fast 等其他服务等级可能有不同倍率。' : '';
   return `<div class="offer-key-head">
     <b>${escapeHtml(o.site_name)} / ${escapeHtml(o.group)}</b>
     <span class="flag" title="${escapeHtml(gs.tip)}">${escapeHtml(gs.text)}</span>
@@ -2362,6 +2367,7 @@ function offerKeyDetails(o, idx){
     ${site.base_url || site.url ? `<a href="${escapeHtml(site.base_url || site.url)}" target="_blank" rel="noreferrer">打开站点 ↗</a>` : ''}
     </div>
     <div class="hint">模型 ${escapeHtml(o.model_raw)} · Key 仅显示掩码；复制和导入时由系统读取明文。</div>
+    ${serviceTierNote ? `<div class="hint"><b>服务等级：</b>${escapeHtml(serviceTierNote)}</div>` : ''}
     ${pendingNote ? `<div class="hint"><b>价格说明：</b>${escapeHtml(pendingNote)}</div>` : ''}
     ${offerTiersHtml(o)}
     <div class="hint" data-offer-health-note="${idx}">${escapeHtml(modelHealthFor(o).note || '')}</div>
@@ -2387,7 +2393,7 @@ function buildDetail(model){
   const offers = state.detailFilter === 'mine' ? all.filter(offerIsMine) : all;
   const dynamicCount = all.filter(o => o.dynamic).length;
   const note = dynamicCount
-    ? `<div class="note-box">其中 ${dynamicCount} 条报价采用分档或动态计费。可解析的 New API 表达式按短上下文（len=0）展示；分时或生图倍率未知的条目按底价参与比价。标有「待确认 · 参考价」的条目价格口径存疑（动态计费、表达式未解析或倍率缺失），同样参与比价但仅供参考——悬停该标签或展开行可查看具体原因。</div>` : '';
+    ? `<div class="note-box">其中 ${dynamicCount} 条报价采用分档或动态计费。可解析的 New API 表达式按短上下文（len=0）展示；标有「未指定服务等级」的价格按请求未指定 service_tier 计算，其他等级倍率可能不同。分时或生图倍率未知的条目按底价参与比价。标有「待确认 · 参考价」的条目价格口径存疑，同样参与比价但仅供参考——悬停该标签或展开行可查看具体原因。</div>` : '';
 
   const minOf = key => { const v = all.filter(priceIsRankable).map(o => o[key]).filter(x => x != null); return v.length ? Math.min(...v) : null; };
   const kv = [
@@ -2436,7 +2442,7 @@ function buildDetail(model){
       <td class="num">${num(o.output)}</td>
       <td class="num">${num(o.per_call)}</td>
       <td class="num" title="${escapeHtml(cacheTip)}">${o.group_ratio != null ? o.group_ratio : '—'}${o.ratio_estimated ? '*' : ''}</td>
-      <td>${o.dynamic ? `<span class="tagmini" title="${escapeHtml(o.billing_expr || JSON.stringify({time_pricing:o.time_pricing, intervals:o.pricing_intervals, image_rate_independent:o.image_rate_independent, image_rate_multiplier:o.image_rate_multiplier}))}">动态</span>` : ''}${pricingCaveated(o) ? `<span class="tagmini" title="${escapeHtml(pricingPendingNote(o) || '价格口径存疑，仅供参考。')}">待确认 · 参考价</span>` : ''}${o.description ? `<span class="tagmini" title="${escapeHtml(o.description)}">说明</span>` : ''}</td>
+      <td>${o.dynamic ? `<span class="tagmini" title="${escapeHtml(o.billing_expr || JSON.stringify({time_pricing:o.time_pricing, intervals:o.pricing_intervals, image_rate_independent:o.image_rate_independent, image_rate_multiplier:o.image_rate_multiplier}))}">动态</span>` : ''}${o.service_tier_basis === 'unspecified' ? `<span class="tagmini" title="请求未指定 service_tier 时的价格；其他服务等级可能有不同倍率。">未指定服务等级</span>` : ''}${pricingCaveated(o) ? `<span class="tagmini" title="${escapeHtml(pricingPendingNote(o) || '价格口径存疑，仅供参考。')}">待确认 · 参考价</span>` : ''}${o.description ? `<span class="tagmini" title="${escapeHtml(o.description)}">说明</span>` : ''}</td>
     </tr><tr class="offer-expand" id="offerDetails${idx}" hidden><td colspan="10">${offerKeyDetails(o, idx)}</td></tr>`;
   }).join('');
 
