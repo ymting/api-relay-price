@@ -64,7 +64,7 @@ curl --noproxy '*' -fsS http://127.0.0.1:8765/healthz          # {"ok": true, "v
 要点：
 
 - **有 TTY** 时才用 `-it` 交互式初始化；Agent 环境通常没有 TTY，`-it` 会直接卡死，必须用上面 `-T` + `--auth-stdin` 的写法。
-- `compose.example.yaml` 默认带 `--no-schedule`，首次上线先不自动采集。**确认人类核对过时区与定时设置后**，再删掉 `command` 那一行并 `up -d`。
+- `compose.example.yaml` 默认按系统设置运行自动采集；新配置默认每天 03:00。首次启动后核对时区、自动采集开关与时间；如需验收期间暂时关闭，在系统设置中关闭并保存。
 - 业务端口只发布到 `127.0.0.1`，公网入口交给宿主 Caddy / Nginx 反代（配置见 `DEPLOY.md` 3.6）。
 
 ---
@@ -200,6 +200,6 @@ sudo docker compose pull && sudo docker compose up -d
 状态目录：/var/lib/relay-price
 访问保护：已开启，账号 admin（密码见下，请首次登录后修改）
 验收：healthz ok / login 200 / 站点列表非空 / 手动采集成功 / 刷新后数据保留
-未做：定时任务（保留 --no-schedule，等你核对时区后再开）
+定时任务：如实填写开关、时区与计划时间；未验证实际执行时须注明
 待你操作：站点凭据需要在「系统设置 → 站点设置」里逐站填写
 ```

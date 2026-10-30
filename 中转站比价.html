@@ -911,7 +911,7 @@ async function loadData(forceServer=false){
     } catch (e) { /* 落到静态 */ }
   }
   if (window.__RELAY_PRICE_DATA__){ applyStatic(window.__RELAY_PRICE_DATA__); return true; }
-  showEmptyState('没有读到本地数据 data/prices.js，也没有连接上本地服务。请双击「启动服务.bat」后重试。');
+  showEmptyState(isFilePage() ? '没有读到本地数据 data/prices.js，也没有连接上后端服务。请双击「启动服务.bat」后重试。' : '未能读取价格快照或连接后端服务，请检查服务状态后刷新页面。');
   return false;
 }
 
@@ -964,25 +964,30 @@ function updateModeBadge(){
   const bannerText = document.getElementById('staticBannerText');
   if (state.mode === 'server'){
     el.className = 'mode-badge server';
-    el.textContent = '本地服务已连接';
+    el.textContent = '后端服务已连接';
     banner.style.display = 'none';
   } else {
     el.className = 'mode-badge static';
-    el.textContent = state.serverPort ? '本地服务已运行（只读快照）' : '未连上本地服务（只读快照）';
+    el.textContent = state.serverPort ? '检测到本机服务（只读快照）' : '后端服务未连接（只读快照）';
     banner.style.display = '';
+    if (openBtn) openBtn.style.display = isFilePage() ? '' : 'none';
+    const retryBtn = document.getElementById('btnRetry');
+    if (retryBtn) retryBtn.textContent = isFilePage() ? '我已经启动了，重试连接' : '重试连接';
     if (state.serverPort){
       if (bannerText) bannerText.innerHTML =
         '<b>检测到本机服务已在 ' + state.serverPort + ' 端口运行。</b>当前页面是本地文件，只能看快照；' +
         '要改配置 / 手动采集，请打开完整功能页面。';
       if (openBtn) openBtn.href = 'http://127.0.0.1:' + state.serverPort + '/';
-    } else if (bannerText){
+    } else if (bannerText && isFilePage()){
       bannerText.innerHTML =
-        '<b>当前连不上本地服务，只能用只读快照看价格。</b>' +
+        '<b>当前连不上后端服务，只能用只读快照看价格。</b>' +
         '要改配置 / 手动采集，请双击项目目录里的 <b>启动服务.bat</b>，它会出现一个黑色命令行窗口，<b>别关它</b>。';
+    } else if (bannerText){
+      bannerText.innerHTML = '<b>当前连不上后端服务，只能用只读快照看价格。</b>请检查服务状态和网络连接后重试。';
     }
   }
   // 按钮不置灰：静态模式下点了会弹提示告诉用户怎么开服务，比一个灰按钮更有用
-  const hint = state.mode === 'server' ? '' : '需要本地服务，点击后会告诉你怎么开';
+  const hint = state.mode === 'server' ? '' : '需要连接后端服务，点击查看提示';
   ['btnCollect','btnAcct','btnFav','btnSettings','btnFav2'].forEach(id => {
     const b = document.getElementById(id);
     if (b) b.title = hint;
@@ -1014,8 +1019,8 @@ function updateHeaderTips(){
             : '')
         : (staleNames.length ? `${staleNames.length} 个站点沿用上次采集结果（${escapeHtml(staleNames.join('、'))}）` : ''));
   } else {
-    schedTip.innerHTML = '要启用定时与手动采集，请双击运行 <b>启动服务.bat</b>';
-    dataTip.innerHTML = '当前页面读的是本地静态快照，改配置 / 采集需先启动本地服务';
+    schedTip.innerHTML = isFilePage() ? '要启用定时与手动采集，请双击运行 <b>启动服务.bat</b>' : '要启用定时与手动采集，请先连接后端服务';
+    dataTip.innerHTML = '当前页面读取的是静态快照，改配置 / 采集需先连接后端服务';
   }
 }
 
@@ -3145,8 +3150,8 @@ function closeSide(){
 function requireServer(){
   if (state.mode === 'server') return true;
   confirmDialog({
-    title: '这一步需要本地服务',
-    body: `
+    title: '这一步需要后端服务',
+    body: isFilePage() ? `
       <p>采集、改配置这些操作要读配置文件、启动采集任务，浏览器自己干不了，得靠同目录下的本地服务。</p>
       <ul>
         <li>双击项目目录里的 <b>启动服务.bat</b></li>
@@ -3154,8 +3159,8 @@ function requireServer(){
         <li>回到本页面点下面的 <b>启动后重试连接</b></li>
       </ul>
       <p>只是看价格的话不用开服务，本地快照照样能看、能筛选、能比价。</p>
-    `,
-    okText: '启动后重试连接',
+    ` : '<p>采集和修改配置需要连接后端服务。请检查服务状态和网络连接，然后重试。</p><p>只读快照仍可用于查看、筛选和比较已保存的价格。</p>',
+    okText: isFilePage() ? '启动后重试连接' : '重试连接',
     onOk: async () => { await connectServer(); },
   });
   return false;

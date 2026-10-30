@@ -42,8 +42,7 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
     stop_grace_period: 60s
-    # 首次上线先关闭调度；验收并核对保存的计划后删除这一行。
-    command: ["sh", "-c", "umask 0077; exec python -X utf8 server.py --port 8765 --no-schedule"]
+    # 自动采集按系统设置运行；首次部署请核对时区、开关和采集时间。
     healthcheck:
       # 显式禁用代理，避免环境变量把本机探活转发出去。
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8765/healthz', timeout=3).read()"]
