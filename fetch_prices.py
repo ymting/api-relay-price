@@ -1437,7 +1437,8 @@ def run_collection(only: str = "", logger: Callable[[str], None] = print, thrott
         for line in diagnostics:
             logger(line + "\n")
         if on_progress:
-            on_progress(index + 1, len(sites), meta.get("name") or site.get("id"), bool(meta["ok"]))
+            on_progress(index + 1, len(sites), meta.get("name") or site.get("id"),
+                        bool(meta.get("ok") and not meta.get("stale")))
 
     # 一个都没采到（失败站点即使沿用回旧数据也不算「本次成功」）时同样不写盘：
     # 否则只会把 generated_at 刷成当下，让首页「数据更新于」谎报新鲜，
@@ -1499,7 +1500,8 @@ def run_collection(only: str = "", logger: Callable[[str], None] = print, thrott
         return {"stopped": True, "written": False, "reason": "采集已停止或站点配置已变化"}
     write_outputs(payload, out_dir)
 
-    ok_count = sum(1 for m in site_meta if m["ok"])
+    # 沿用旧数据不是本轮采集成功，日志与任务摘要采用同一口径。
+    ok_count = sum(1 for m in site_meta if m.get("ok") and not m.get("stale"))
     logger(f"\n完成：{ok_count}/{len(site_meta)} 个站点成功，"
            f"共 {len(models_built)} 个模型、{len(merged_offers)} 条报价"
            + (f"（其中 {len(stale_ids)} 个站点沿用了上一次的数据："

@@ -854,6 +854,46 @@ async function connectServer(){
   updateModeBadge();
   await loadData();
   updateHeaderTips();
+  startSnapshotPolling();
+}
+
+// 定时只读本地状态；新快照出现时才重新渲染，绝不触发站点采集。
+let snapshotPollTimer = null;
+let snapshotPollPending = false;
+let snapshotRevision = 0;
+function startSnapshotPolling(){
+  if (snapshotPollTimer) clearInterval(snapshotPollTimer);
+  if (state.mode !== 'server') return;
+  snapshotPollTimer = setInterval(checkSnapshotUpdates, 60000);
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.mode === 'server') void checkSnapshotUpdates();
+});
+
+async function checkSnapshotUpdates(){
+  if (state.mode !== 'server' || document.hidden || snapshotPollPending) return;
+  snapshotPollPending = true;
+  try {
+    const status = await apiGet('/snapshot-status');
+    if (!status || !status.ok || state.mode !== 'server' || !state.server) return;
+    // 只更新状态摘要，不能覆盖设置页正在使用的其它服务端数据。
+    if (status.schedule) state.server.schedule = {...state.server.schedule, ...status.schedule};
+    if (status.task) state.server.task = {...state.server.task, ...status.task};
+    if (status.generated_at && status.generated_at !== state.meta.generated_at){
+      const revision = snapshotRevision;
+      const idx = await apiGet('/index');
+      // 如果等待期间其它操作已载入快照，留给下次轮询核对，避免旧响应覆盖新数据。
+      if (idx && idx.ok && idx.generated_at && revision === snapshotRevision){
+        state.detailCache.clear();
+        applyIndex(idx);
+      }
+    }
+    updateHeaderTips();
+  } catch (e) {
+    // 临时断线时保留已显示的数据，下一轮再尝试。
+  } finally {
+    snapshotPollPending = false;
+  }
 }
 
 async function loadData(forceServer=false){
@@ -876,6 +916,7 @@ async function loadData(forceServer=false){
 }
 
 function applyIndex(idx){
+  snapshotRevision++;
   state.models = idx.models || [];
   state.siteMeta = idx.sites || [];
   state.meta = {generated_at:idx.generated_at, model_count:idx.model_count,

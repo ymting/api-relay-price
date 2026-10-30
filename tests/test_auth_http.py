@@ -76,9 +76,24 @@ class AuthHttpTests(unittest.TestCase):
                     self.assertEqual(self.status(instance), 200)
 
     def test_business_api_without_session_returns_401(self):
-        instance = handler(self.server, "/api/state")
-        instance.do_GET()
-        self.assertEqual(self.status(instance), 401)
+        for path in ("/api/state", "/api/snapshot-status"):
+            with self.subTest(path=path):
+                instance = handler(self.server, path)
+                instance.do_GET()
+                self.assertEqual(self.status(instance), 401)
+
+    def test_snapshot_status_returns_lightweight_status(self):
+        token, _ = self.sessions.create()
+        instance = handler(self.server, "/api/snapshot-status", cookie="relay_session=" + token)
+        task = Mock(status=Mock(return_value={"running": False, "summary": {"ok_sites": 1}}))
+        cache = Mock(get_index=Mock(return_value={"generated_at": "new", "models": ["large"]}))
+        with patch.object(self.server, "CACHE", cache), patch.object(self.server, "TASK", task):
+            instance.do_GET()
+        payload = instance.send_json.call_args.args[0]
+        self.assertEqual(payload["generated_at"], "new")
+        self.assertEqual(payload["task"]["summary"]["ok_sites"], 1)
+        self.assertNotIn("models", payload)
+        self.assertIn("next_run", payload["schedule"])
 
     def test_root_redirects_to_login(self):
         instance = handler(self.server, "/")

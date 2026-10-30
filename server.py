@@ -369,7 +369,9 @@ class CollectorTask:
                         self.stopped = True
                         self.stop_reason = str(payload.get("reason") or "被手动停止")
                     return
-                ok = sum(1 for s in payload["sites"] if s["ok"])
+                # 写盘完成后先刷新服务缓存，定时采集无需依赖浏览器触发重载。
+                CACHE.reload()
+                ok = sum(1 for s in payload["sites"] if s.get("ok") and not s.get("stale"))
                 with self.lock:
                     self.last_summary = {
                         "ok_sites": ok,
@@ -442,6 +444,11 @@ class CollectorTask:
                 "error": self.error,
                 "summary": self.last_summary,
             }
+
+    def status(self) -> dict:
+        """首页轮询只需要运行状态和摘要，不复制完整采集日志。"""
+        with self.lock:
+            return {"running": self.running, "summary": self.last_summary}
 
 
 TASK = CollectorTask()
@@ -548,14 +555,15 @@ class DataCache:
         """重新加载本地数据文件。"""
         index_path = DATA_DIR / "index.json"
         json_path = DATA_DIR / "prices.json"
-        full, index = None, None
-        if json_path.exists():
-            full = collector.load_json(json_path, default=None)
-        if index_path.exists():
-            index = collector.load_json(index_path, default=None)
-        elif full:
-            index = collector.build_index(full)
+        # 串行化整个重载过程，避免较早开始的读取覆盖较新的缓存。
         with self.lock:
+            full, index = None, None
+            if json_path.exists():
+                full = collector.load_json(json_path, default=None)
+            if index_path.exists():
+                index = collector.load_json(index_path, default=None)
+            elif full:
+                index = collector.build_index(full)
             self.full = full
             self.index = index
             self.mtime = max(p.stat().st_mtime for p in (index_path, json_path) if p.exists()) \
@@ -1892,6 +1900,14 @@ class Handler(BaseHTTPRequestHandler):
             scheduled = bool((settings.get("schedule") or {}).get("enabled", True))
             return self.send_json({"ok": True, **build_retirement_report(
                 matrix, pending=pending, scheduled_available=scheduled)})
+
+        if path == "/api/snapshot-status":
+            # 首页只轮询轻量状态；完整报价只在快照变化时重新读取。
+            index = CACHE.get_index() or {}
+            return self.send_json({"ok": True, "generated_at": index.get("generated_at"),
+                                   "task": TASK.status(),
+                                   "schedule": {"enabled": SCHEDULER.enabled, "time": SCHEDULER.time_str,
+                                                "next_run": SCHEDULER.get_next_run()}})
 
         if path == "/api/index":
             index = CACHE.get_index()

@@ -293,6 +293,54 @@ class TaskEntryAndHealthTests(unittest.TestCase):
         for call in seen:
             self.assertIn("should_stop", call)
 
+    def test_scheduled_collection_refreshes_cache_and_counts_only_fresh_sites(self):
+        import server
+        self.data.mkdir()
+        write_json(self.data / "prices.json", {"generated_at": "old", "models": []})
+        write_json(self.data / "index.json", {"generated_at": "old", "models": []})
+        task = server.CollectorTask()
+
+        def fake_run(**kwargs):
+            write_json(self.data / "prices.json", {"generated_at": "new", "models": []})
+            write_json(self.data / "index.json", {"generated_at": "new", "models": []})
+            return {"stopped": False, "sites": [{"ok": True}, {"ok": True, "stale": True}],
+                    "model_count": 1, "offer_count": 1, "generated_at": "new", "stale_sites": ["second"]}
+
+        with patch.object(server, "DATA_DIR", self.data), \
+             patch.object(server.collector, "run_collection", side_effect=fake_run), \
+             patch.object(server, "ensure_settings", return_value={}), \
+             patch.object(server, "log_line"):
+            cache = server.DataCache()
+            with patch.object(server, "CACHE", cache):
+                self.assertTrue(task.start(trigger="schedule"))
+                for _ in range(200):
+                    if not task.snapshot()["running"]:
+                        break
+                    time.sleep(.01)
+                snapshot = task.snapshot()
+                self.assertFalse(snapshot["running"])
+                self.assertIsNone(snapshot["error"])
+                self.assertEqual(cache.get_index()["generated_at"], "new")
+                self.assertEqual(snapshot["summary"]["ok_sites"], 1)
+                self.assertEqual(snapshot["summary"]["stale_sites"], ["second"])
+
+    def test_stopped_collection_does_not_refresh_cache_or_replace_summary(self):
+        import server
+        task = server.CollectorTask()
+        task.last_summary = {"generated_at": "old"}
+        cache = Mock()
+        with patch.object(server, "CACHE", cache), \
+             patch.object(server.collector, "run_collection", return_value={"stopped": True, "written": False}), \
+             patch.object(server, "ensure_settings", return_value={}), patch.object(server, "log_line"):
+            self.assertTrue(task.start(trigger="schedule"))
+            for _ in range(200):
+                if not task.snapshot()["running"]:
+                    break
+                time.sleep(.01)
+            self.assertTrue(task.snapshot()["stopped"])
+            self.assertEqual(task.snapshot()["summary"], {"generated_at": "old"})
+            cache.reload.assert_not_called()
+
     def test_cli_uses_the_same_entrypoint(self):
         import fetch_prices as fp
         calls = []
