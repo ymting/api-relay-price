@@ -2687,8 +2687,9 @@ function cindyResultHtml(res){
     <details style="margin-top:8px;"><summary>导入详情与备用链接</summary>
     <div class="copy-line"><input type="text" id="ccLink" value="${escapeHtml(res.link)}" readonly>
       <button class="btn btn-sm" id="ccCopy" data-copy="link">复制链接</button></div>
-    <div class="copy-line" style="margin-top:6px;"><input type="text" id="ccKey" value="${escapeHtml(res.api_key || '')}" readonly>
-      <button class="btn btn-sm" id="ccKeyCopy" data-copy="key">复制 Key</button></div>
+    <div class="copy-line" style="margin-top:6px; flex-wrap:wrap;"><input type="text" id="ccKey" value="${escapeHtml(res.api_key || '')}" readonly>
+      <button class="btn btn-sm" id="ccKeyCopy" data-copy="key">复制 Key</button>
+      <button class="btn btn-sm" data-copy="endpoint">复制 BaseURL</button></div>
     <div class="row-between" style="margin-top:8px;">
       <a class="btn btn-primary btn-sm" id="ccOpen" href="${escapeHtml(res.link)}">打开 Cindy 导入</a>
       <span class="tip-inline">系统已自动唤起；若浏览器拦截，可在这里重试。是否完成导入请查看 Cindy。</span>
@@ -2776,11 +2777,15 @@ async function importOffer(btn){
       box = document.getElementById(`offerStatus${idx}`);
     }
     if (box) box.innerHTML = (isCindy ? cindyResultHtml(res) : ccResultHtml(res)).replace(/id="cc(Link|Copy|Open)"/g, '');
-    // 结果区里每个复制按钮各管一份文本：Cindy 分支有链接与明文 Key 两个
+    // 结果区里每个复制按钮各管一份文本：Cindy 分支有链接、明文 Key 与端点三个
     const copyBtns = box ? box.querySelectorAll('.copy-line button') : [];
     copyBtns.forEach(copyBtn => {
       copyBtn.addEventListener('click', async () => {
-        const value = copyBtn.dataset.copy === 'key' ? (res.api_key || '') : res.link;
+        // 端点取后端实际写进深链的 baseUrl（OpenAI 系带 /v1，Anthropic 是站点根），
+        // 不是站点根地址，避免用户手动添加时填错。
+        const field = copyBtn.dataset.copy;
+        const value = field === 'key' ? (res.api_key || '')
+          : field === 'endpoint' ? (res.endpoint || '') : res.link;
         copyBtn.textContent = await copyText(value) ? '已复制' : '复制失败';
       });
     });
