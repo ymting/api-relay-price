@@ -194,8 +194,8 @@ class HttpClient:
                 time.sleep(1.2 * (attempt + 1))
         raise FetchError(f"请求失败 {url}：{last_err}")
 
-    def get_json(self, url: str) -> tuple[int, dict]:
-        code, text = self.request(url)
+    def get_json(self, url: str, headers: dict[str, str] | None = None) -> tuple[int, dict]:
+        code, text = self.request(url, headers=headers)
         try:
             return code, json.loads(text)
         except Exception:
@@ -338,9 +338,22 @@ class Sub2ApiAdapter:
         self.debug = debug
 
     def fetch(self) -> dict:
-        code, payload = self.client.get_json(f"{self.base}/api/v1/model-plaza")
-        if code == 401:
-            raise AuthError("该站点模型广场要求登录/令牌")
+        # 模型广场原本匿名可读，部分站点后来改成必须登录。配置里有面板令牌就带上，
+        # 带令牌还 401 说明令牌过期 —— 这时只能让用户刷新账户，别在这里擅自刷新令牌：
+        # refresh_token 是一次性轮换的，采集流程抢先刷新会把账户链路的令牌作废。
+        auth = self.site.get("auth") or {}
+        token = str(auth.get("access_token") or "").strip()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        prefix = (self.site.get("api_prefix") or "/api/v1").rstrip("/")
+        code, payload = self.client.get_json(f"{self.base}{prefix}/model-plaza", headers=headers)
+        if code in (401, 403):
+            expired = auth.get("expires_at")
+            hint = ""
+            if token and isinstance(expired, (int, float)) and expired:
+                hint = f"（当前令牌 {time.strftime('%Y-%m-%d %H:%M', time.localtime(expired))} 已过期）"
+            elif not token:
+                hint = "（站点配置里没有面板令牌）"
+            raise AuthError(f"模型广场要求登录授权{hint}：请在「站点配置」里刷新一次账户，拿到新令牌后会自动带上采集")
         if code != 200:
             raise FetchError(f"模型广场返回异常（HTTP {code}）")
 
@@ -1551,7 +1564,10 @@ def build_index(payload: dict) -> dict:
         by_site: dict[str, dict] = {}
         for offer in m["offers"]:
             sid = offer["site"]
-            cell = by_site.setdefault(sid, {"input": None, "output": None, "call": None})
+            cell = by_site.setdefault(sid, {"input": None, "output": None, "call": None, "time": False})
+            # 分时计价：cell 里放的是各时段最低价，前端会标「分时」，免得把底价当实时价
+            if offer.get("price_windows"):
+                cell["time"] = True
             if not price_is_rankable(offer):
                 continue
             for src, dst in (("input", "input"), ("output", "output"), ("per_call", "call")):

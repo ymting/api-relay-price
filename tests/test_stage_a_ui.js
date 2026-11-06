@@ -12,7 +12,7 @@ global.alert = () => {};
 global.fetch = async () => {throw new Error('This test must not use network');};
 const source = fs.readFileSync(path.join(__dirname, '..', '中转站比价.html'), 'utf8');
 const script = source.match(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/)[1];
-new Function(script + '\nwindow.testA={state,rechargeOf,acctCardHtml,acctSummaryHtml,buildDetail,groupStateFor,siteCardHtml,modelHealthFor,groupHealthFor,healthBadge,accountFeatureIssues,topupRecordsHtml,parseBillingTiers,tierCondLabel,offerTiersHtml,detectServer,isFilePage};')();
+new Function(script + '\nwindow.testA={state,rechargeOf,acctCardHtml,acctSummaryHtml,buildDetail,groupStateFor,siteCardHtml,modelHealthFor,groupHealthFor,healthBadge,accountFeatureIssues,topupRecordsHtml,parseBillingTiers,tierCondLabel,offerTiersHtml,currentTimeWindow,offerFieldPrice,offerTimeWindowsHtml,timeWindowBadge,sortedOffers,windowSpanLabel,detectServer,isFilePage};')();
 const t = window.testA;
 t.state.currency = 'USD';
 t.state.accounts = [];
@@ -126,6 +126,52 @@ check('无档位信息时不出分档表', () => {
   assert.equal(t.offerTiersHtml({group_ratio: 1, billing_expr: 'hour("Asia/Shanghai") >= 9 ? tier("peak", p * 9) : tier("off_peak", p * 4.5)'}), '');
   assert.equal(t.offerTiersHtml({group_ratio: 1, pricing_intervals: [{tier_label: 'only', input_price: 1e-6}]}), '');
   assert.equal(t.offerTiersHtml({group_ratio: 1}), '');
+});
+// —— 分时价格（闲时/忙时）：按当前时间取价，判断不了回退最低价 ——
+const flatWindows = {tz:'Asia/Shanghai', variants:true, windows:[
+  {label:'闲时', days:[1,2,3,4,5,6,7], day_label:'每天', start:0, end:1440, wrap:false,
+    multiplier:1, peak:false, input:5, output:10, cache_read:null, cache_write:null, cache_write_1h:null, per_call:null}]};
+check('能判断当前时段时优先用时段价，不用后端写入的底价', () => {
+  const o = {input:1, output:2, per_call:null, price_windows:flatWindows.windows, time_windows:flatWindows};
+  assert.equal(t.currentTimeWindow(o).input, 5);
+  assert.equal(t.offerFieldPrice(o, 'input'), 5);
+  assert.equal(t.offerFieldPrice(o, 'output'), 10);
+});
+check('时区换算不出来时退回后端写入的最低价', () => {
+  const o = {input:1, output:2, per_call:null, price_windows:flatWindows.windows,
+    time_windows:{...flatWindows, tz:'Mars/Olympus'}};
+  assert.equal(t.currentTimeWindow(o), null);
+  assert.equal(t.offerFieldPrice(o, 'input'), 1);
+});
+check('分时表渲染各时段价格并标出当前档位，跨零点时间显示成次日', () => {
+  const windows = [
+    {label:'高峰', days:[1,2,3,4,5,6,7], day_label:'每天', start:540, end:720, wrap:false,
+      multiplier:2, peak:true, input:3, output:9, per_call:null},
+    {label:'闲时', days:[1,2,3,4,5,6,7], day_label:'每天', start:1080, end:540, wrap:true,
+      multiplier:1, peak:false, input:1.5, output:4.5, per_call:null}];
+  const html = t.offerTimeWindowsHtml({price_windows:windows, time_windows:{tz:'Asia/Shanghai', windows}});
+  assert.ok(html.includes('分时价格'));
+  assert.ok(html.includes('09:00–12:00'));
+  assert.ok(html.includes('18:00–次日09:00'));
+  assert.ok(html.includes('$3.00') && html.includes('$1.50'));
+  assert.ok(html.includes('当前'));      // 两段覆盖全天，必有一段命中当前时间
+  assert.ok(html.includes('time-now'));
+  assert.ok(!html.includes('undefined'));
+});
+check('分时表只在多档时出现，备注列标记跟随当前档位', () => {
+  assert.equal(t.offerTimeWindowsHtml({price_windows:[flatWindows.windows[0]], time_windows:flatWindows}), '');
+  assert.equal(t.timeWindowBadge({price_windows:[flatWindows.windows[0]], time_windows:flatWindows}), '');
+  const two = [{label:'高峰', days:[1,2,3,4,5,6,7], start:0, end:720, multiplier:2, peak:true, input:6},
+    {label:'闲时', days:[1,2,3,4,5,6,7], start:720, end:1440, multiplier:1, peak:false, input:3}];
+  const badge = t.timeWindowBadge({price_windows:two, time_windows:{tz:'Asia/Shanghai', windows:two}});
+  assert.ok(/高峰 ×2|闲时/.test(badge));
+});
+check('排序按当前时段价而不是底价，忙时贵的排在后面', () => {
+  const busy = {site:'a', site_name:'A', model_raw:'m', group:'g', input:1, output:null, per_call:null,
+    group_ratio:1, pricing_verified:true, price_windows:flatWindows.windows, time_windows:flatWindows};
+  const steady = {site:'b', site_name:'B', model_raw:'m', group:'g', input:3, output:null, per_call:null,
+    group_ratio:1, pricing_verified:true};
+  assert.deepEqual(t.sortedOffers({offers:[busy, steady]}).map(o => o.site), ['b', 'a']);
 });
 check('服务等级表达式仅展示已验证的未指定等级分档', () => {
   const base = 'len < 272000 ? tier("base", p * 2 + c * 10) : tier("long", p * 4 + c * 15)';

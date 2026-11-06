@@ -212,6 +212,9 @@ select:focus,input:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--
 .tagmini{background:var(--panel-soft); border:1px solid var(--border); border-radius:5px; padding:1px 6px;}
 .spread{color:var(--amber); background:var(--amber-soft); border-radius:5px; padding:1px 6px;}
 .best{color:var(--green); background:var(--green-soft); border-radius:5px; padding:1px 6px;}
+/* 分时价格：当前生效的时段要高亮，标记也要和普通标签区分开 */
+.tier-box tr.time-now td{background:var(--amber-soft); font-weight:600;}
+.tagmini.time{color:var(--amber); background:var(--amber-soft); border-color:transparent;}
 .empty{padding:50px 20px; text-align:center; color:var(--text-3);}
 
 /* ---------- 遮罩与居中弹窗（抽屉已全部改为弹窗） ---------- */
@@ -929,7 +932,9 @@ function applyStatic(full){
   const models = full.models.map(m => {
     const bySite = {};
     for (const o of m.offers){
-      const cell = bySite[o.site] || (bySite[o.site] = {input:null, output:null, call:null});
+      const cell = bySite[o.site] || (bySite[o.site] = {input:null, output:null, call:null, time:false});
+      // 分时计价的站点要在卡片上标出来：卡片里的数字是各时段最低价，不是此刻的价
+      if (o.price_windows && o.price_windows.length) cell.time = true;
       if (o.input != null && (cell.input == null || o.input < cell.input)) cell.input = o.input;
       if (o.output != null && (cell.output == null || o.output < cell.output)) cell.output = o.output;
       if (o.per_call != null && (cell.call == null || o.per_call < cell.call)) cell.call = o.per_call;
@@ -1656,6 +1661,8 @@ function decorate(models){
       _call: pick('call'),
       _maxInput: inputs.length ? Math.max(...inputs) : null,
       _sites: cells.length,
+      // 该模型在筛选范围内的站点里是否有分时计价（卡片上标明，免得把底价当场时价）
+      _time: cells.some(c => c && c.time === true),
       _score: m.__score || 0,
     };
   });
@@ -1726,6 +1733,7 @@ function cardHtml(m){
       ${spread}
       ${m._sites > 1 ? '<span class="best">可跨站比价</span>' : ''}
       <span class="tagmini">${m.offer_count} 条报价</span>
+      ${m._time ? '<span class="tagmini time" title="有站点按闲时/忙时或星期分时计价，卡片显示的是最低时段价；打开模型可按当前时间看实时价。">分时</span>' : ''}
       ${(m.vendors || []).slice(0,2).map(v => `<span class="tagmini">${escapeHtml(v)}</span>`).join('')}
     </div>
   </div>`;
@@ -1967,6 +1975,111 @@ function pricingCaveated(o){
   return o.pricing_verified === false || o.ratio_estimated === true;
 }
 
+// —— 分时价格（闲时/忙时、工作日/周末）——
+// 站点把时段窗口和每个时段的单价一起写进了快照（price_windows / time_windows），
+// 页面按站点声明的时区算出「现在」落在哪一段：能判断就显示当前时段价，判断不了退回最低时段价。
+// 注意：这里的「最低价」是后端写进 input/output 的各时段最低值，所以任何情况下都有数可看。
+const TZ_WEEKDAY = {Sun:7, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6};
+
+function tzNowParts(tz){
+  try{
+    const parts = new Intl.DateTimeFormat('en-US', {timeZone: tz, hour12: false,
+      weekday: 'short', hour: '2-digit', minute: '2-digit'}).formatToParts(new Date());
+    const pick = type => (parts.find(p => p.type === type) || {}).value;
+    const weekday = TZ_WEEKDAY[pick('weekday')];
+    // 部分引擎把午夜给成 24 点，取模统一成 0
+    const hour = Number(pick('hour')) % 24;
+    const minute = Number(pick('minute'));
+    if (!weekday || !Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+    return {weekday, hour, minute, minutes: hour * 60 + minute};
+  } catch (e){ return null; }   // 浏览器不认这个时区名 → 外层退回最低价
+}
+
+function offerTimeWindows(o){
+  const list = o && Array.isArray(o.price_windows) ? o.price_windows : null;
+  return list && list.length ? list : null;
+}
+
+/** 当前生效的时段窗口；没有分时数据或换算不出时间时返回 null。 */
+function currentTimeWindow(o){
+  const windows = offerTimeWindows(o);
+  if (!windows) return null;
+  const info = o.time_windows || {};
+  const tz = info.tz || windows[0].tz;
+  const now = tz ? tzNowParts(tz) : null;
+  if (!now) return null;
+  return windows.find(w => {
+    if (Array.isArray(w.days) && w.days.length && !w.days.includes(now.weekday)) return false;
+    if (w.start == null || w.end == null) return true;
+    // wrap = 跨零点（如 18:00–次日09:00）
+    return w.wrap ? (now.minutes >= w.start || now.minutes < w.end)
+                  : (now.minutes >= w.start && now.minutes < w.end);
+  }) || null;
+}
+
+/** 展示价：能判断当前时段就用该段单价，否则用后端写入的最低价。 */
+function offerFieldPrice(o, field){
+  if (!o) return null;
+  const w = currentTimeWindow(o);
+  if (w && w[field] != null) return w[field];
+  return o[field];
+}
+
+function clockLabel(minutes){
+  const m = Math.max(0, Math.min(1440, Number(minutes) || 0));
+  const hh = Math.floor(m / 60), mm = m % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
+function windowSpanLabel(w){
+  if (!w || w.start == null || w.end == null) return '全天';
+  return `${clockLabel(w.start)}–${w.wrap ? '次日' : ''}${clockLabel(w.end)}`;
+}
+
+/** 备注列的分时标记：平时叫「闲时/高峰」，判断不出时间就只说明这是分时价。 */
+function timeWindowBadge(o){
+  const windows = offerTimeWindows(o);
+  if (!windows || windows.length < 2) return '';
+  const active = currentTimeWindow(o);
+  if (!active){
+    return `<span class="tagmini time" title="站点按闲时/忙时（或星期）分时计价；当前时间无法换算，表内按最低时段价显示，展开可看各时段单价。">分时</span>`;
+  }
+  const mult = active.multiplier != null ? active.multiplier : 1;
+  const name = active.label || (active.peak ? '高峰' : '闲时');
+  const tip = `当前处于「${name}」时段（${active.day_label || '每天'} ${windowSpanLabel(active)}，倍率 ×${mult}）。`
+    + '表内价格已按当前时段显示，展开可看各时段单价。';
+  return `<span class="tagmini time" title="${escapeHtml(tip)}">${escapeHtml(name)}${mult !== 1 ? ` ×${mult}` : ''}</span>`;
+}
+
+/** 报价展开面板里的「分时价格」表：各时段单价 + 当前时段高亮。 */
+function offerTimeWindowsHtml(o){
+  const windows = offerTimeWindows(o);
+  if (!windows || windows.length < 2) return '';
+  const info = o.time_windows || {};
+  const active = currentTimeWindow(o);
+  const now = info.tz ? tzNowParts(info.tz) : null;
+  const cols = [['输入/M', 'input'], ['输出/M', 'output'], ['缓存读/M', 'cache_read'],
+    ['缓存写/M', 'cache_write'], ['缓存写1h/M', 'cache_write_1h'], ['单次', 'per_call']];
+  const rows = windows.map(w => {
+    const isNow = active === w;
+    return `<tr${isNow ? ' class="time-now"' : ''}>
+      <td>${escapeHtml(w.label || (w.peak ? '高峰' : '闲时'))}${isNow ? ' <span class="flag ok">当前</span>' : ''}</td>
+      <td>${escapeHtml(w.day_label || '每天')}</td>
+      <td class="num">${escapeHtml(windowSpanLabel(w))}</td>
+      <td class="num">×${w.multiplier != null ? w.multiplier : 1}</td>
+      ${cols.map(([, key]) => `<td class="num">${w[key] != null ? money(w[key]) : '<span class="na">—</span>'}</td>`).join('')}
+    </tr>`;
+  }).join('');
+  const stamp = now
+    ? `现在 ${String(now.hour).padStart(2, '0')}:${String(now.minute).padStart(2, '0')} · ${info.tz || ''}`
+      + (info.assumed_timezone ? '（站点未标时区，按北京时间估算）' : '')
+    : '当前时间无法换算，主表按最低时段价显示';
+  return `<details class="tier-box"${tierExpandDefault() ? ' open' : ''} style="margin-top:8px;"><summary>分时价格（${escapeHtml(stamp)}）</summary>
+    <div class="table-wrap"><table class="compact"><thead><tr><th>档位</th><th>星期</th><th>时间段</th><th>倍率</th>${cols.map(([h]) => `<th>${h}</th>`).join('')}</tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="hint">表内是该时段实际单价（已含分组倍率）；主表默认显示当前时段价，判断不出时间时按最便宜的时段。</div></details>`;
+}
+
 // —— 上下文档位解析（NewAPI billing_expr，纯静态拆解，绝不执行表达式）——
 // 表达式形如 ((len < 272000)) ? (tier("base", p*2+c*10)) : (((len >= 272000)) ? ...)
 // 思路：递归拆三元树；条件是 len/p 与数字比较的记为一档，叶子 tier("标签", 线性系数) 还原单价；
@@ -2150,9 +2263,12 @@ function offerTiersHtml(o){
 }
 
 function sortedOffers(model){
+  // 排序要用「当前时段价」：分时站点的底价和忙时价差别可能翻倍，按底价排会误导
+  const sortPrice = o => o.input != null ? offerFieldPrice(o, 'input')
+    : (o.per_call != null ? offerFieldPrice(o, 'per_call') : null);
   return [...model.offers].sort((a,b) => {
-    const ka = a.input != null ? [0, a.input] : (a.per_call != null ? [1, a.per_call] : [2, 0]);
-    const kb = b.input != null ? [0, b.input] : (b.per_call != null ? [1, b.per_call] : [2, 0]);
+    const ka = a.input != null ? [0, sortPrice(a)] : (a.per_call != null ? [1, sortPrice(a)] : [2, 0]);
+    const kb = b.input != null ? [0, sortPrice(b)] : (b.per_call != null ? [1, sortPrice(b)] : [2, 0]);
     return Number(!priceIsRankable(a))-Number(!priceIsRankable(b)) || ka[0]-kb[0] || ka[1]-kb[1];
   });
 }
@@ -2375,6 +2491,7 @@ function offerKeyDetails(o, idx){
     ${serviceTierNote ? `<div class="hint"><b>服务等级：</b>${escapeHtml(serviceTierNote)}</div>` : ''}
     ${pendingNote ? `<div class="hint"><b>价格说明：</b>${escapeHtml(pendingNote)}</div>` : ''}
     ${offerTiersHtml(o)}
+    ${offerTimeWindowsHtml(o)}
     <div class="hint" data-offer-health-note="${idx}">${escapeHtml(modelHealthFor(o).note || '')}</div>
     ${a && a.ok && enabled ? `<div class="offer-key-head" style="margin-top:10px;">
       <label for="offerApp${idx}">导入到</label><select id="offerApp${idx}">${apps.map(app => `<option value="${escapeHtml(app.id)}">${escapeHtml(app.name)}</option>`).join('')}</select>
@@ -2397,8 +2514,12 @@ function buildDetail(model){
   const all = sortedOffers(model);
   const offers = state.detailFilter === 'mine' ? all.filter(offerIsMine) : all;
   const dynamicCount = all.filter(o => o.dynamic).length;
-  const note = dynamicCount
-    ? `<div class="note-box">其中 ${dynamicCount} 条报价采用分档或动态计费。可解析的 New API 表达式按短上下文（len=0）展示；标有「未指定服务等级」的价格按请求未指定 service_tier 计算，其他等级倍率可能不同。分时或生图倍率未知的条目按底价参与比价。标有「待确认 · 参考价」的条目价格口径存疑，同样参与比价但仅供参考——悬停该标签或展开行可查看具体原因。</div>` : '';
+  const timeCount = all.filter(o => offerTimeWindows(o)).length;
+  const timeNote = timeCount
+    ? `其中 ${timeCount} 条报价是分时计价（闲时/忙时或按星期）：主表按站点时区显示当前时段单价，展开行可看各时段价格；当前时间换算不出来时，主表按最低时段价显示。`
+    : '';
+  const note = (dynamicCount || timeNote)
+    ? `<div class="note-box">${dynamicCount ? `其中 ${dynamicCount} 条报价采用分档或动态计费。可解析的 New API 表达式按短上下文（len=0）展示；标有「未指定服务等级」的价格按请求未指定 service_tier 计算，其他等级倍率可能不同。分时或生图倍率未知的条目按底价参与比价。标有「待确认 · 参考价」的条目价格口径存疑，同样参与比价但仅供参考——悬停该标签或展开行可查看具体原因。` : ''}${timeNote}</div>` : '';
 
   const minOf = key => { const v = all.filter(priceIsRankable).map(o => o[key]).filter(x => x != null); return v.length ? Math.min(...v) : null; };
   const kv = [
@@ -2434,7 +2555,7 @@ function buildDetail(model){
         keyHtml = `<span class="na">${a.keys_complete === false ? '未知' : '暂无'}</span>`;
       }
     }
-    const cacheTip = `缓存读 ${o.cache_read != null ? money(o.cache_read) : '—'} / 缓存写 ${o.cache_write != null ? money(o.cache_write) : '—'}`;
+    const cacheTip = `缓存读 ${offerFieldPrice(o, 'cache_read') != null ? money(offerFieldPrice(o, 'cache_read')) : '—'} / 缓存写 ${offerFieldPrice(o, 'cache_write') != null ? money(offerFieldPrice(o, 'cache_write')) : '—'}`;
     const lowest = idx === 0 && priceIsRankable(o) && (o.input != null || o.per_call != null);
     return `
     <tr class="offer-row ${lowest ? 'lowest' : ''}" data-offer-index="${idx}" tabindex="0" aria-expanded="false" aria-controls="offerDetails${idx}">
@@ -2443,11 +2564,11 @@ function buildDetail(model){
       <td data-offer-health="${idx}">${healthBadge(o)}</td>
       <td>${keyHtml}</td>
       <td class="mono mname" title="${escapeHtml(o.model_raw)}">${escapeHtml(o.model_raw)}</td>
-      <td class="num">${num(o.input)}</td>
-      <td class="num">${num(o.output)}</td>
-      <td class="num">${num(o.per_call)}</td>
+      <td class="num">${num(offerFieldPrice(o, 'input'))}</td>
+      <td class="num">${num(offerFieldPrice(o, 'output'))}</td>
+      <td class="num">${num(offerFieldPrice(o, 'per_call'))}</td>
       <td class="num" title="${escapeHtml(cacheTip)}">${o.group_ratio != null ? o.group_ratio : '—'}${o.ratio_estimated ? '*' : ''}</td>
-      <td>${o.dynamic ? `<span class="tagmini" title="${escapeHtml(o.billing_expr || JSON.stringify({time_pricing:o.time_pricing, intervals:o.pricing_intervals, image_rate_independent:o.image_rate_independent, image_rate_multiplier:o.image_rate_multiplier}))}">动态</span>` : ''}${o.service_tier_basis === 'unspecified' ? `<span class="tagmini" title="请求未指定 service_tier 时的价格；其他服务等级可能有不同倍率。">未指定服务等级</span>` : ''}${pricingCaveated(o) ? `<span class="tagmini" title="${escapeHtml(pricingPendingNote(o) || '价格口径存疑，仅供参考。')}">待确认 · 参考价</span>` : ''}${o.description ? `<span class="tagmini" title="${escapeHtml(o.description)}">说明</span>` : ''}</td>
+      <td>${o.dynamic && !offerTimeWindows(o) ? `<span class="tagmini" title="${escapeHtml(o.billing_expr || JSON.stringify({time_pricing:o.time_pricing, intervals:o.pricing_intervals, image_rate_independent:o.image_rate_independent, image_rate_multiplier:o.image_rate_multiplier}))}">动态</span>` : ''}${timeWindowBadge(o)}${o.service_tier_basis === 'unspecified' ? `<span class="tagmini" title="请求未指定 service_tier 时的价格；其他服务等级可能有不同倍率。">未指定服务等级</span>` : ''}${pricingCaveated(o) ? `<span class="tagmini" title="${escapeHtml(pricingPendingNote(o) || '价格口径存疑，仅供参考。')}">待确认 · 参考价</span>` : ''}${o.description ? `<span class="tagmini" title="${escapeHtml(o.description)}">说明</span>` : ''}</td>
     </tr><tr class="offer-expand" id="offerDetails${idx}" hidden><td colspan="10">${offerKeyDetails(o, idx)}</td></tr>`;
   }).join('');
 
