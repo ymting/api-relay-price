@@ -26,14 +26,17 @@ class ScriptedClient:
     def __init__(self, replies):
         self.replies = iter(replies)
         self.calls = []
+        self.call_headers = []   # 与 calls 一一对应，供断言「采集有没有带上面板令牌」
         self.writes = []
         self.stop_check = None
         self.timeout = 12
         self.tries = 3
         self.auth_header = {}
 
-    def get_json(self, url):
+    def get_json(self, url, headers=None):
+        # 与 HttpClient.get_json 的真实签名保持一致：Sub2API 模型广场会带 Authorization。
         self.calls.append(url)
+        self.call_headers.append(dict(headers or {}))
         response = next(self.replies)
         if isinstance(response, Exception):
             raise response
@@ -145,6 +148,16 @@ class Sub2PriceTests(unittest.TestCase):
         self.assertAlmostEqual(result["cache_write"], 1.875)
         self.assertEqual(result["group_ratio"], .5)
         self.assertTrue(result["pricing_verified"])
+
+    def test_model_plaza_carries_panel_token_only_when_configured(self):
+        """部分站的模型广场已改成必须登录：配了面板令牌就带 Bearer，没配就别伪造。"""
+        for token, expected in (("panel-token", {"Authorization": "Bearer panel-token"}), ("", {})):
+            with self.subTest(token=token):
+                client = ScriptedClient([(200, {"groups": []})])
+                site = {**SITE, "type": "sub2api"}
+                site["auth"] = {"access_token": token} if token else {}
+                fp.Sub2ApiAdapter(site, client).fetch()
+                self.assertEqual(client.call_headers[0], expected)
 
     def test_per_request_price_keeps_per_request_unit(self):
         result = self.fetch({"per_request_price": .04})
