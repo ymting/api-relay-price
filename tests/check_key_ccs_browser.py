@@ -39,7 +39,9 @@ window.fetch=async(url,init={})=>{
  const route=new URL(url,location.href).pathname,body=init.body?JSON.parse(init.body):{};
  qaCalls.push({route,body});let result;
  const wait=async name=>{while(!window[name])await new Promise(r=>setTimeout(r,10));};
- if(route.endsWith('/state'))result={ok:true,mode:'server',sites:[qaSite],settings:{currency:'USD',auto_refresh_model_health:false},accounts:{accounts:[qaAccount]},schedule:{enabled:false},task:{running:false}};
+ if(route.endsWith('/state'))result={ok:true,mode:'server',sites:[qaSite],settings:{currency:'USD',auto_refresh_model_health:false},accounts:{accounts:[qaAccount]},schedule:{enabled:false},task:{running:false},
+  ccswitch_apps:[['claude','Claude Code','anthropic'],['claude-desktop','Claude Desktop','anthropic'],['codex','Codex','openai_responses'],['gemini','Gemini CLI','gemini_native'],['agy','Antigravity','gemini_native'],['grokbuild','Grok Build','openai_responses'],['opencode','OpenCode','openai_chat'],['openclaw','OpenClaw','openai_chat'],['hermes','Hermes','openai_chat'],['pi','Pi','openai_chat'],['mcode','MiniMax Code','openai_chat'],['kimi','Kimi Code','openai_chat'],['dsh','DeepSeek Harness','openai_chat'],['omp','Oh My Pi','openai_chat'],['copilot','Copilot CLI','openai_chat']].map(([id,name,format])=>({id,name,format,formats:['anthropic','openai_chat','openai_responses','gemini_native']})),
+  cindy_apps:[{id:'claude',name:'Claude Code'},{id:'codex',name:'Codex'},{id:'pi',name:'Pi'}]};
  else if(route.endsWith('/index'))result={ok:true,models:[],sites:[qaSite],model_count:0,offer_count:0,site_count:1};
  else if(route.endsWith('/token/create')){
   await wait('qaReleaseCreate');result={ok:true,token:{id:42,name:qaTokenName,key:'sk-synthetic-key-42',group:'default',group_id:7}};
@@ -75,7 +77,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   state.detailCache.set('fixture',model);state.detailCache.set('other',{...model,key:'other',display:'其他模型'});
   await openModelDetail('fixture');
   document.querySelector('[data-act="offer-toggle"]').click();
-  document.getElementById('offerApp0').value='codex';document.getElementById('offerUsage0').checked=false;
+  state.importChoice={target:'ccs',app:'codex',withUsage:false,format:''};
   document.querySelector('[data-act="makekey"]').click();
   check('创建保留输入名称确认框',document.getElementById('dialogTitle').textContent==='创建 Key');
   const input=document.getElementById('confirmInput');input.value=qaTokenName;input.dispatchEvent(new Event('input'));
@@ -87,11 +89,21 @@ document.addEventListener('DOMContentLoaded',async()=>{
   await until(()=>!!document.querySelector('[data-created-import]'));
   check('创建成功自动复制完整Key且仅一次',qaCopied.length===1&&qaCopied[0]==='sk-synthetic-key-42');
   check('局部缓存保留真实group_id',state.accounts[0].tokens[0].group_id===7);
-  check('创建后保留展开状态和导入选项',!document.getElementById('offerDetails0').hidden&&document.getElementById('offerApp0').value==='codex'&&!document.getElementById('offerUsage0').checked);
+  check('创建后保留展开状态和导入选项',!document.getElementById('offerDetails0').hidden&&state.importChoice.app==='codex'&&state.importChoice.withUsage===false);
   check('创建后未额外刷新账户或健康',count('/accounts')===0&&!qaCalls.some(c=>/health|refresh/.test(c.route)));
   check('创建后仍需确认导入',qaOpened.length===0&&document.getElementById('dialogTitle').textContent==='Key 已创建并复制');
-  document.getElementById('dialogOk').click();
+  document.getElementById('dialogCancel').click();
+  // 一键导入：先弹选择框（客户端 → 应用），确认后才发导出请求
   const listImport=document.querySelector('[data-act="offer-import"]');listImport.click();
+  check('一键导入先问客户端',document.getElementById('dialogTitle').textContent==='一键导入'&&!!document.getElementById('importStep2'));
+  check('CC Switch 列出十五个应用',document.querySelectorAll('#importApp option').length===15);
+  document.querySelector('[data-import-target="cindy"]').click();
+  check('Cindy 只列三个引擎',document.querySelectorAll('#importApp option').length===3);
+  document.querySelector('[data-import-target="ccs"]').click();
+  check('切回 CC Switch 恢复十五个应用',document.querySelectorAll('#importApp option').length===15);
+  document.getElementById('importApp').value='codex';
+  document.getElementById('importApp').dispatchEvent(new Event('change'));
+  document.getElementById('dialogOk').click();
   await until(()=>count('/export/ccswitch')===1);
   check('创建结果与列表重复入口合并在途请求',count('/export/ccswitch')===1);
   let call=qaCalls.filter(c=>c.route.endsWith('/export/ccswitch')).at(-1);
@@ -106,7 +118,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   await importOffer(auto);
   check('自动创建导入成功回填token_id便于再次复用',auto.dataset.token==='99'&&auto.dataset.hasCreated==='1');
   check('使用本地账户快照更新Key列表且不额外GET',state.accounts[0].tokens.some(t=>t.id===99)&&count('/accounts')===0);
-  check('自动创建导入保留展开状态及选项',!document.getElementById('offerDetails0').hidden&&document.getElementById('offerApp0').value==='codex'&&!document.getElementById('offerUsage0').checked);
+  check('自动创建导入保留展开状态及选项',!document.getElementById('offerDetails0').hidden&&state.importChoice.app==='codex'&&state.importChoice.withUsage===false);
   const countBefore=count('/export/ccswitch'),openedBefore=qaOpened.length;
   qaReleaseExport=false;
   const pending=importOffer(document.querySelector('[data-act="offer-import"][data-token="99"]'));

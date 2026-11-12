@@ -8,7 +8,8 @@ from contextlib import ExitStack
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from integrations.ccs import build_ccswitch_link, newapi_usage, sub2api_usage
+from integrations.ccs import (CC_APPS, CC_APP_FORMATS, build_ccswitch_link, cc_api_formats_for,
+                              cc_default_format, cc_endpoint_for, newapi_usage, sub2api_usage)
 from integrations.configuration import merge_sites, public_site, write_json
 from integrations.contracts import Feature
 from integrations.providers import HttpResponse
@@ -175,6 +176,55 @@ class CcsLinkTests(unittest.TestCase):
         self.assertEqual(cleaned[0]["icon_url"], site["icon_url"])
 
 
+class CcsAppCatalogTests(unittest.TestCase):
+    """应用表要与 CC Switch 4.0.29 的 AppType 对齐，且每个都能拼出合法链接。"""
+
+    def test_catalog_covers_every_ccswitch_app(self):
+        self.assertEqual(list(CC_APPS), [
+            "claude", "claude-desktop", "codex", "gemini", "agy", "grokbuild", "opencode",
+            "openclaw", "hermes", "pi", "mcode", "kimi", "dsh", "omp", "copilot"])
+        self.assertEqual(CC_APPS["agy"], "Antigravity")
+        self.assertEqual(CC_APPS["mcode"], "MiniMax Code")
+        self.assertEqual(CC_APPS["omp"], "Oh My Pi")
+
+    def test_default_format_matches_ccswitch_default_for(self):
+        self.assertEqual(cc_default_format("claude"), "anthropic")
+        self.assertEqual(cc_default_format("claude-desktop"), "anthropic")
+        self.assertEqual(cc_default_format("codex"), "openai_responses")
+        self.assertEqual(cc_default_format("grokbuild"), "openai_responses")
+        self.assertEqual(cc_default_format("gemini"), "gemini_native")
+        self.assertEqual(cc_default_format("agy"), "gemini_native")
+        for app in ("opencode", "openclaw", "hermes", "pi", "mcode", "kimi", "dsh", "omp", "copilot"):
+            with self.subTest(app=app):
+                self.assertEqual(cc_default_format(app), "openai_chat")
+
+    def test_every_app_declares_its_native_format(self):
+        for app, formats in CC_APP_FORMATS.items():
+            self.assertIn(formats, cc_api_formats_for(app))
+
+    def test_endpoint_stops_at_root_for_anthropic_and_gemini(self):
+        for fmt in ("anthropic", "gemini_native"):
+            with self.subTest(fmt=fmt):
+                self.assertEqual(cc_endpoint_for("https://fixture.invalid", fmt), "https://fixture.invalid")
+                # 站点地址自带宽 /v1 时不能再拼一层
+                self.assertEqual(cc_endpoint_for("https://fixture.invalid/v1/", fmt), "https://fixture.invalid")
+
+    def test_endpoint_adds_single_v1_for_openai_formats(self):
+        for fmt in ("openai_chat", "openai_responses", ""):
+            with self.subTest(fmt=fmt):
+                self.assertEqual(cc_endpoint_for("https://fixture.invalid", fmt), "https://fixture.invalid/v1")
+                self.assertEqual(cc_endpoint_for("https://fixture.invalid/v1", fmt), "https://fixture.invalid/v1")
+        self.assertEqual(cc_endpoint_for("", "openai_chat"), "")
+
+    def test_every_app_builds_a_link_and_keeps_api_format(self):
+        for app in CC_APPS:
+            with self.subTest(app=app):
+                link = build_ccswitch_link(app=app, name="站点-Key-模型", endpoint="https://fixture.invalid",
+                                           api_key="sk-fixture", model="fixture-model")
+                self.assertTrue(link.startswith("ccswitch://v1/import?"))
+                self.assertIn(f"app={app}", link)
+
+
 class CcsProviderTests(unittest.TestCase):
     def setUp(self):
         fixture = stage_d.RuntimeTests()
@@ -224,6 +274,78 @@ class CcsProviderTests(unittest.TestCase):
         self.assertEqual(values["icon"], ["sub2api"])
         self.assertEqual(values["iconUrl"], [fixture.site["icon_url"]])
         self.assertNotIn("usageScript", values)
+
+    def _export(self, **overrides):
+        """跑一次真实 export_ccswitch，只把网络与落盘换成 fixture。"""
+        import server
+        fixture = self.fixture
+        fixture.remote.rows = [{"id": 3, "name": "fixture-key", "group": "default"}]
+        write_json(fixture.config, {"sites": [fixture.site]})
+        body = {"site": fixture.site["id"], "model": "fixture-model", "group": "default",
+                "token_id": 3, "create": False, "with_usage": False, **overrides}
+        with ExitStack() as stack:
+            for name, value in (("TOKEN_SESSIONS", {}), ("TOKEN_REVISIONS", {}),
+                                ("find_site", lambda _: fixture.site),
+                                ("ensure_settings", lambda: {"proxy_mode": "direct"}),
+                                ("ccswitch_info", lambda: {"api_format_ok": True})):
+                stack.enter_context(patch.object(server, name, value))
+            stack.enter_context(patch.object(server.collector, "integration_runtime", return_value=fixture.runtime))
+            stack.enter_context(patch.object(server, "log_line"))
+            return server.export_ccswitch(body)
+
+    def test_endpoint_and_format_follow_the_selected_app(self):
+        for app, endpoint, api_format in (
+                ("claude", "https://fixture.invalid", "anthropic"),
+                ("claude-desktop", "https://fixture.invalid", "anthropic"),
+                ("codex", "https://fixture.invalid/v1", "openai_responses"),
+                ("gemini", "https://fixture.invalid", "gemini_native"),
+                ("agy", "https://fixture.invalid", "gemini_native"),
+                ("kimi", "https://fixture.invalid/v1", "openai_chat"),
+                ("copilot", "https://fixture.invalid/v1", "openai_chat")):
+            with self.subTest(app=app):
+                result, status = self._export(app=app)
+                self.assertEqual(status, 200, result)
+                self.assertEqual(result["endpoint"], endpoint)
+                self.assertEqual(result["api_format"], api_format)
+                self.assertEqual(result["app_name"], CC_APPS[app])
+
+    def test_explicit_api_format_overrides_default_and_rejects_unsupported(self):
+        result, status = self._export(app="claude", api_format="openai_chat")
+        self.assertEqual(status, 200, result)
+        values = parse_qs(urlsplit(result["link"]).query)
+        self.assertEqual(values["apiFormat"], ["openai_chat"])
+        # OpenAI 系格式要带 /v1，端点随格式一起变
+        self.assertEqual(result["endpoint"], "https://fixture.invalid/v1")
+
+        for app, fmt in (("gemini", "openai_chat"), ("agy", "anthropic"), ("hermes", "gemini_native")):
+            with self.subTest(app=app, fmt=fmt):
+                result, status = self._export(app=app, api_format=fmt)
+                self.assertEqual(status, 400, result)
+                self.assertFalse(result["ok"])
+
+    def test_old_ccswitch_version_drops_api_format_but_keeps_endpoint(self):
+        import server
+        fixture = self.fixture
+        fixture.remote.rows = [{"id": 3, "name": "fixture-key", "group": "default"}]
+        write_json(fixture.config, {"sites": [fixture.site]})
+        with ExitStack() as stack:
+            for name, value in (("TOKEN_SESSIONS", {}), ("TOKEN_REVISIONS", {}),
+                                ("find_site", lambda _: fixture.site),
+                                ("ensure_settings", lambda: {"proxy_mode": "direct"}),
+                                ("ccswitch_info", lambda: {"api_format_ok": False, "version": "4.0.9"})):
+                stack.enter_context(patch.object(server, name, value))
+            stack.enter_context(patch.object(server.collector, "integration_runtime", return_value=fixture.runtime))
+            stack.enter_context(patch.object(server, "log_line"))
+            result, status = server.export_ccswitch({"site": fixture.site["id"], "app": "gemini",
+                                                     "api_format": "gemini_native",
+                                                     "model": "fixture-model", "group": "default",
+                                                     "token_id": 3, "create": False, "with_usage": False})
+        self.assertEqual(status, 200, result)
+        values = parse_qs(urlsplit(result["link"]).query)
+        self.assertNotIn("apiFormat", values)
+        # 即使链接不带 apiFormat，端点仍按应用默认格式（Gemini 原生）停在站点根
+        self.assertEqual(result["endpoint"], "https://fixture.invalid")
+        self.assertTrue(any("4.0.9" in w for w in result["warn"]))
 
 
 if __name__ == "__main__":

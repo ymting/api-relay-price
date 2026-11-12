@@ -34,7 +34,8 @@ from __future__ import annotations
 
 # 这几个是从接入层转出口的：本地服务用 collector.CC_APPS / collector.build_ccswitch_link，
 # 回归脚本用 fp.CC_USAGE_SCRIPT / fp.CC_API_FORMAT_MIN_VERSION，故在本模块内看起来"未使用"。
-from integrations.ccs import CC_APPS, CC_API_FORMAT_MIN_VERSION, CC_USAGE_SCRIPT, build_ccswitch_link
+from integrations.ccs import (CC_APPS, CC_API_FORMAT_MIN_VERSION, CC_USAGE_SCRIPT, build_ccswitch_link,
+                              cc_api_formats_for, cc_default_format, cc_endpoint_for)
 
 import argparse
 import difflib

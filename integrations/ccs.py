@@ -5,16 +5,89 @@ import math
 import re
 import urllib.parse
 
+# CC Switch 4.0.29 的 AppType 全集（顺序与程序里的枚举一致）。
+# 这张表只放「Provider 深链导入」支持的应用：claude-desktop / mcode 等在 4.0.x
+# 已有专属 build 分支，因此都能导入；若对方的版本更老，它会在确认框里给出
+# 「不支持的应用标识」，前端结果区会提示升级。
 CC_APPS = {
     "claude": "Claude Code",
+    "claude-desktop": "Claude Desktop",
     "codex": "Codex",
     "gemini": "Gemini CLI",
+    "agy": "Antigravity",
     "grokbuild": "Grok Build",
     "opencode": "OpenCode",
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
     "pi": "Pi",
+    "mcode": "MiniMax Code",
+    "kimi": "Kimi Code",
+    "dsh": "DeepSeek Harness",
+    "omp": "Oh My Pi",
+    "copilot": "Copilot CLI",
 }
+
+# 每个应用的默认接口格式，对齐 CC Switch `ApiFormat::default_for`。
+# 它决定两件事：链接带不带 apiFormat、端点要不要拼 /v1 —— 写错的直接后果是
+# 导入后在客户端里连不上（例如 Gemini 原生协议的地址再拼 /v1 会变成 /v1/v1beta）。
+CC_APP_FORMATS = {
+    "claude": "anthropic",
+    "claude-desktop": "anthropic",
+    "codex": "openai_responses",
+    "grokbuild": "openai_responses",
+    "gemini": "gemini_native",
+    "agy": "gemini_native",
+}
+
+# 各应用支持的接口格式白名单（对齐 CC Switch ApiFormat::native_value）。
+# 不在表里的组合会被 CC Switch 直接拒绝，所以后端提前挡掉并说明原因。
+CC_APP_API_FORMATS = {
+    "claude": ("anthropic", "openai_chat", "openai_responses", "gemini_native"),
+    "claude-desktop": ("anthropic", "openai_chat", "openai_responses", "gemini_native"),
+    "codex": ("openai_responses", "openai_chat", "anthropic"),
+    "grokbuild": ("openai_responses", "openai_chat", "anthropic"),
+    "gemini": ("gemini_native",),
+    "agy": ("gemini_native",),
+    "opencode": ("anthropic", "openai_chat", "openai_responses", "gemini_native"),
+    "openclaw": ("anthropic", "openai_chat", "openai_responses", "gemini_native"),
+    "pi": ("anthropic", "openai_chat", "openai_responses", "gemini_native"),
+    "hermes": ("anthropic", "openai_chat", "openai_responses"),
+    "mcode": ("anthropic", "openai_chat", "openai_responses"),
+    "kimi": ("anthropic", "openai_chat", "openai_responses", "gemini_native"),
+    "dsh": ("anthropic", "openai_chat", "openai_responses"),
+    "omp": ("anthropic", "openai_chat", "openai_responses", "gemini_native"),
+    "copilot": ("anthropic", "openai_chat", "openai_responses"),
+}
+
+# 这两个协议由客户端自己拼版本前缀（/v1/messages、/v1beta/models），
+# 端点必须停在站点根；其余 OpenAI 兼容协议按惯例带 /v1。
+CC_ROOT_ONLY_FORMATS = ("anthropic", "gemini_native")
+
+
+def cc_default_format(app: str) -> str:
+    """某应用的默认接口格式；未知应用回落到 OpenAI Chat（与 CCS 的 `_ => OpenAiChat` 一致）。"""
+    return CC_APP_FORMATS.get((app or "").strip(), "openai_chat")
+
+
+def cc_api_formats_for(app: str) -> tuple:
+    """某应用接受的接口格式；未知应用给全集，交给 CC Switch 自己判断。"""
+    return CC_APP_API_FORMATS.get((app or "").strip(), CC_API_FORMATS[1:])
+
+
+def cc_endpoint_for(base_url: str, api_format: str) -> str:
+    """按接口格式给出要写进客户端的端点。
+
+    Anthropic / Gemini 原生协议由客户端补 `/v1/messages`、`/v1beta/models`，
+    端点停在站点根；OpenAI 系协议带 `/v1`。站点地址自己已经带了 `/v1` 时
+    只做一次规整，避免拼出 `/v1/v1` —— CC Switch 拿到端点后原样落盘，不会替你修。
+    """
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    trimmed = base[:-3] if base.endswith("/v1") else base
+    if (api_format or "").strip() in CC_ROOT_ONLY_FORMATS:
+        return trimmed
+    return trimmed + "/v1"
 
 CC_API_FORMATS = ("", "anthropic", "openai_chat", "openai_responses", "gemini_native")
 

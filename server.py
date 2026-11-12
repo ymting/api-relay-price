@@ -1121,6 +1121,12 @@ def export_ccswitch(body: dict) -> tuple[dict, int]:
     proxy = settings_proxy(settings, site)
     info = ccswitch_info()
     wanted_format = str(body.get("api_format") or "").strip()
+    # 显式格式优先，否则用该应用的默认格式。这个值决定端点要不要拼 /v1，
+    # 所以即使当前 CC Switch 版本不接受 apiFormat 参数，也要先算出来再拼端点。
+    app_format = wanted_format or collector.cc_default_format(app)
+    if wanted_format and wanted_format not in collector.cc_api_formats_for(app):
+        allowed = "、".join(collector.cc_api_formats_for(app))
+        return {"ok": False, "error": f"{collector.CC_APPS[app]} 不支持 {wanted_format} 格式；可选：{allowed}"}, 400
     api_format = wanted_format
     if api_format and not info.get("api_format_ok"):
         api_format = ""  # 老版本不认这个参数，降级而不是生成一条被拒的链接
@@ -1148,7 +1154,8 @@ def export_ccswitch(body: dict) -> tuple[dict, int]:
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 400
 
-    endpoint = str(body.get("endpoint") or "").strip() or (resolved["base_url"] + "/v1")
+    endpoint = str(body.get("endpoint") or "").strip() or collector.cc_endpoint_for(
+        resolved["base_url"], app_format)
     site_name = site.get("name") or site.get("id")
     link = collector.build_ccswitch_link(
         app=app,
@@ -1190,6 +1197,7 @@ def export_ccswitch(body: dict) -> tuple[dict, int]:
         "model": model,
         "app": app,
         "app_name": collector.CC_APPS[app],
+        "api_format": app_format,
         "group": resolved["group"],
         "created": resolved["created"],
         "token_id": resolved["token_id"],
@@ -1861,7 +1869,9 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "site_types": list(SITE_TYPES),
                 "ccswitch": ccswitch,
-                "ccswitch_apps": [{"id": k, "name": v} for k, v in collector.CC_APPS.items()],
+                "ccswitch_apps": [{"id": k, "name": v, "format": collector.cc_default_format(k),
+                                   "formats": list(collector.cc_api_formats_for(k))}
+                                  for k, v in collector.CC_APPS.items()],
                 "cindy": cindy,
                 "cindy_apps": [{"id": k, "name": cindy_link.cindy_app_name(k)}
                                for k in cindy_link.CINDY_APP_TARGETS],

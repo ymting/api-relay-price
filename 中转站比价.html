@@ -418,6 +418,17 @@ textarea.cookie-inp{width:100%; min-height:76px; font-family:"Cascadia Mono","Co
 .copy-line{display:flex; gap:8px; align-items:center; margin-top:10px;}
 .copy-line input{flex:1; font-family:"Cascadia Mono","Consolas",ui-monospace,monospace; font-size:12px;}
 
+/* 一键导入：第 1 步的客户端二选一。选中态用主色描边，别只靠背景色区分 */
+.import-targets{display:grid; grid-template-columns:1fr 1fr; gap:8px;}
+.import-target{display:flex; flex-direction:column; align-items:flex-start; gap:2px;
+  text-align:left; padding:9px 11px; line-height:1.45; white-space:normal;}
+.import-target b{font-size:13px;}
+.import-target span{font-size:11.5px; color:var(--text-3);}
+.import-target.on{border-color:var(--accent); background:var(--accent-soft);}
+.import-target.on span{color:var(--text-2);}
+.import-picker .field{margin-top:10px;}
+.import-picker .check{margin-top:10px;}
+
 /* ---------- 表单 ---------- */
 .form-card{background:#fff; border:1px solid var(--border); border-radius:10px;
   padding:13px 14px; margin-bottom:10px; box-shadow:var(--shadow);}
@@ -692,6 +703,8 @@ const state = {
   accountsCollapsed: false, // 收起只隐藏站点列表，汇总和后台任务反馈保持可见
   manualTarget: {scope:'all', sites:[], models:[]},  // 手动采集的目标，服务端已持久化
   detailFilter: 'all',    // 详情表格筛选：all | mine（只看账号能用 / 已建 Key 的分组）
+  // 一键导入的选择（跨模型、跨 Key 复用）：绝大多数人只会用同一个客户端和应用。
+  importChoice: {target:'ccs', app:'', withUsage:true, format:''},
   collectScope: 'all',    // 手动采集的范围：all | custom
   pickedSites: new Set(),  // 自定义采集选中的站点 id
   pickedModels: new Set(), // 自定义采集选中的模型 key（空 = 该站全部模型）
@@ -2472,7 +2485,6 @@ function offerKeyDetails(o, idx){
   const a = acctOf(o.site);
   const tokens = offerTokens(o);
   const gs = groupStateFor(o.site, o.group, o);
-  const apps = (state.server && state.server.ccswitch_apps) || [{id:'claude', name:'Claude Code'}, {id:'codex', name:'Codex'}, {id:'gemini', name:'Gemini CLI'}, {id:'opencode', name:'OpenCode'}];
   const site = ((state.server || {}).sites || []).find(s => s.id === o.site) || state.siteMeta.find(s => s.id === o.site) || {};
   const enabled = site.enabled !== false;
   const pendingNote = pricingPendingNote(o);
@@ -2493,16 +2505,13 @@ function offerKeyDetails(o, idx){
     ${offerTiersHtml(o)}
     ${offerTimeWindowsHtml(o)}
     <div class="hint" data-offer-health-note="${idx}">${escapeHtml(modelHealthFor(o).note || '')}</div>
-    ${a && a.ok && enabled ? `<div class="offer-key-head" style="margin-top:10px;">
-      <label for="offerApp${idx}">导入到</label><select id="offerApp${idx}">${apps.map(app => `<option value="${escapeHtml(app.id)}">${escapeHtml(app.name)}</option>`).join('')}</select>
-      <label class="check"><input type="checkbox" id="offerUsage${idx}" checked> 带余额查询</label></div>
+    ${a && a.ok && enabled ? `<div class="hint" style="margin-top:10px;">点「一键导入」后先选客户端（CC Switch / Cindy），再选要导入的应用。</div>
       ${a.keys_complete === false ? '<div class="hint">Key 列表未完整更新；下方保留上次成功数据，无条目不表示没有 Key。</div>' : ''}
       ${tokens.map(t => { const issue = tokenIssue(t, o.model_raw); return `<div class="offer-key-item">
         <div class="offer-key-info"><b>${escapeHtml(t.name || '未命名 Key')}</b> <span class="flag${issue ? '' : ' ok'}">${escapeHtml(issue || '已启用')}</span>
           <span class="mono">${escapeHtml(t.key_masked || '掩码未提供')}</span></div>
         <button class="btn btn-sm" data-act="copykey" data-site="${escapeHtml(o.site)}" data-id="${escapeHtml(String(t.id))}">复制 Key</button>
-        <button class="btn btn-primary btn-sm" data-act="offer-import" data-target="ccs" data-offer="${idx}" data-token="${escapeHtml(String(t.id))}"${issue ? ' disabled' : ''}>一键导入 CC Switch</button>
-        <button class="btn btn-sm" data-act="offer-import" data-target="cindy" data-offer="${idx}" data-token="${escapeHtml(String(t.id))}"${issue ? ' disabled' : ''}>导入到 Cindy</button>
+        <button class="btn btn-primary btn-sm" data-act="offer-import" data-offer="${idx}" data-token="${escapeHtml(String(t.id))}"${issue ? ' disabled' : ''}>一键导入</button>
         <button class="btn btn-danger btn-sm" data-act="deletekey" data-offer="${idx}" data-token="${escapeHtml(String(t.id))}">删除</button>
       </div>`; }).join('') || `<div class="hint" style="margin:10px 0;">${a.keys_complete === false ? '此分组 Key 状态未知。' : '此分组暂无 Key。'}</div>`}
       <div class="row-between" style="margin-top:10px;"><button class="btn btn-sm" data-act="makekey" data-offer="${idx}">创建 Key…</button></div>`
@@ -2618,7 +2627,7 @@ function bindDetailEvents(root){
     });
   });
   body.querySelectorAll('[data-act=offer-import]').forEach(btn => {
-    btn.addEventListener('click', () => importOffer(btn));
+    btn.addEventListener('click', () => openImportPicker(btn));
   });
   body.querySelectorAll('[data-act=health]').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -2755,8 +2764,9 @@ function ccResultHtml(res){
       <a class="btn btn-primary btn-sm" id="ccOpen" href="${escapeHtml(res.link)}">打开 CC Switch 导入</a>
       <span class="tip-inline">系统已自动唤起；若浏览器拦截，可在这里重试。是否完成导入请查看 CC Switch。</span>
     </div>
-    <div class="hint" style="margin-top:6px;">端点 ${escapeHtml(res.endpoint)}　分组 ${escapeHtml(res.group)}　` +
-    `${res.created ? '已新建 Key' : '复用已有 Key'}${res.usage ? '　含余额查询' : ''}</div></details>`;
+    <div class="hint" style="margin-top:6px;">端点 ${escapeHtml(res.endpoint)}　分组 ${escapeHtml(res.group)}` +
+    `${res.api_format ? `　格式 ${escapeHtml(formatLabel(res.api_format))}` : ''}` +
+    `${res.created ? '　已新建 Key' : '　复用已有 Key'}${res.usage ? '　含余额查询' : ''}</div></details>`;
 }
 
 function launchCcSwitch(link){
@@ -2860,24 +2870,128 @@ async function closeCindyAndImport(btn, link){
   }
 }
 
+/* ---------- 一键导入：先选客户端，再选应用 ---------- */
+
+const API_FORMAT_LABELS = {
+  anthropic:'Anthropic', openai_chat:'OpenAI Chat',
+  openai_responses:'OpenAI Responses', gemini_native:'Gemini 原生',
+};
+function formatLabel(id){ return API_FORMAT_LABELS[id] || id || '应用默认'; }
+
+/** 当前客户端可选的应用：Cindy 只有三个引擎，CC Switch 十五个（服务端下发的全集）。 */
+function importApps(){
+  const server = state.server || {};
+  const list = state.importChoice.target === 'cindy' ? server.cindy_apps : server.ccswitch_apps;
+  return Array.isArray(list) ? list : [];
+}
+
+function importAppEntry(id){
+  return importApps().find(a => a.id === id) || null;
+}
+
+/** 第二步（选应用 + 接口格式）。客户端切换时只重渲染这一块，第一步保持可点。 */
+function importStep2Html(){
+  const choice = state.importChoice;
+  const apps = importApps();
+  if (!apps.length) return '<div class="hint">服务端没有返回应用列表，请刷新页面后再试。</div>';
+  // 换客户端后旧应用可能不在新集合里（ccs 十五个 / cindy 三个），回落到第一项
+  if (!apps.some(a => a.id === choice.app)) choice.app = apps[0].id;
+  const app = importAppEntry(choice.app);
+  const appField = `<div class="field"><label for="importApp">导入到哪个应用</label>
+    <select id="importApp">${apps.map(a => `<option value="${escapeHtml(a.id)}"${a.id === choice.app ? ' selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}</select></div>`;
+
+  if (choice.target === 'cindy'){
+    return appField + '<div class="hint">Cindy 只有 Claude Code / Codex / Pi 三个引擎；它不支持余额查询，用量请在 Cindy 里查看。</div>';
+  }
+
+  const formats = (app && Array.isArray(app.formats) && app.formats.length)
+    ? app.formats : ['anthropic', 'openai_chat', 'openai_responses', 'gemini_native'];
+  if (!formats.includes(choice.format)) choice.format = '';
+  const autoLabel = `自动（${formatLabel(app && app.format)}）`;
+  const formatField = `<div class="field"><label for="importFormat">接口格式</label>
+    <select id="importFormat"><option value=""${choice.format ? '' : ' selected'}>${escapeHtml(autoLabel)}</option>
+    ${formats.map(f => `<option value="${escapeHtml(f)}"${f === choice.format ? ' selected' : ''}>${escapeHtml(formatLabel(f))}</option>`).join('')}</select></div>`;
+  return appField + formatField +
+    `<label class="check"><input type="checkbox" id="importUsage"${choice.withUsage ? ' checked' : ''}> 带余额查询（写入用量脚本，导入后卡片上直接显示余额）</label>
+     <div class="hint">端点按格式自动拼接：Anthropic / Gemini 原生停在站点根，OpenAI 系带 /v1；格式选错客户端会连不上。</div>`;
+}
+
+function renderImportStep2(){
+  const host = document.getElementById('importStep2');
+  if (!host) return;
+  host.innerHTML = importStep2Html();
+  const appSel = document.getElementById('importApp');
+  if (appSel) appSel.addEventListener('change', () => {
+    state.importChoice.app = appSel.value;
+    renderImportStep2();   // 换应用后接口格式的候选也跟着换
+  });
+  const fmtSel = document.getElementById('importFormat');
+  if (fmtSel) fmtSel.addEventListener('change', () => { state.importChoice.format = fmtSel.value; });
+  const usage = document.getElementById('importUsage');
+  if (usage) usage.addEventListener('change', () => { state.importChoice.withUsage = usage.checked; });
+}
+
+/** 点「一键导入」先问去哪：CC Switch 还是 Cindy，再选具体应用。 */
+function openImportPicker(btn){
+  if (!requireServer() || btn.disabled) return;
+  const idx = Number(btn.dataset.offer);
+  if (!detailOffers()[idx]) return;
+  const choice = state.importChoice;
+  if (choice.target !== 'cindy') choice.target = 'ccs';
+
+  const targets = [
+    {id:'ccs', name:'CC Switch', note:'15 个客户端：Claude Code、Codex、Gemini CLI、Antigravity…'},
+    {id:'cindy', name:'Cindy', note:'3 个引擎：Claude Code / Codex / Pi，不支持余额查询'},
+  ];
+  confirmDialog({
+    title:'一键导入',
+    body:`<div class="import-picker">
+      <div class="hint">第 1 步：导入到哪个客户端</div>
+      <div class="import-targets">${targets.map(t => `<button type="button" class="btn import-target${t.id === choice.target ? ' on' : ''}" data-import-target="${t.id}">
+        <b>${escapeHtml(t.name)}</b><span>${escapeHtml(t.note)}</span></button>`).join('')}</div>
+      <div class="hint" style="margin-top:12px;">第 2 步：选择应用</div>
+      <div id="importStep2"></div></div>`,
+    okText:'开始导入', cancelText:'取消',
+    onOk:() => importOffer(btn),
+  });
+  const content = document.getElementById('dialogContent');
+  content.querySelectorAll('[data-import-target]').forEach(el => {
+    el.addEventListener('click', () => {
+      choice.target = el.dataset.importTarget;
+      content.querySelectorAll('[data-import-target]').forEach(x => x.classList.toggle('on', x === el));
+      renderImportStep2();
+    });
+  });
+  renderImportStep2();
+}
+
 /** 导入到 CC Switch 或 Cindy：两者共用同一套「取 Key → 拼深链 → 唤起客户端」流程，
- *  差别只在端点（/export/ccswitch vs /export/cindy）、结果渲染与唤起协议。 */
+ *  差别只在端点（/export/ccswitch vs /export/cindy）、结果渲染与唤起协议。
+ *  客户端与应用来自选择弹窗（state.importChoice），不再从行内控件读。 */
 async function importOffer(btn){
   if (!requireServer() || btn.disabled) return;
   const idx = Number(btn.dataset.offer), offer = detailOffers()[idx];
   if (!offer) return;
-  const isCindy = btn.dataset.target === 'cindy';
+  const isCindy = state.importChoice.target === 'cindy';
+  const app = state.importChoice.app;
   const modelKey = currentModelKey, version = detailRenderVersion;
   let box = document.getElementById(`offerStatus${idx}`);
   const label = btn.textContent;
+  if (!app){
+    if (box) box.innerHTML = '<div class="err">没有可用的应用列表，请刷新页面后重试。</div>';
+    return;
+  }
   const payload = {site:offer.site, group:offer.group, group_id:offer.group_id, model:offer.model_raw,
-    app:document.getElementById(`offerApp${idx}`).value,
-    create:!btn.dataset.token && !btn.dataset.hasCreated};
+    app, create:!btn.dataset.token && !btn.dataset.hasCreated};
   // Cindy 没有余额查询能力，不传该开关，免得服务端回一条无意义的提示
-  if (!isCindy) payload.with_usage = !!document.getElementById(`offerUsage${idx}`).checked;
+  if (!isCindy){
+    payload.with_usage = !!state.importChoice.withUsage;
+    // 只在用户显式改过格式时传；「自动」交给服务端按应用默认值算
+    if (state.importChoice.format) payload.api_format = state.importChoice.format;
+  }
   if (btn.dataset.token) payload.token_id = btn.dataset.token;
   const requestKey = JSON.stringify([isCindy ? 'cindy' : 'ccs', offer.site, offer.group_id ?? offer.group,
-    offer.model_raw, payload.app, payload.token_id || '@create']);
+    offer.model_raw, payload.app, payload.token_id || '@create', payload.api_format || '']);
   if (pendingCcImports.has(requestKey)) return;
   pendingCcImports.add(requestKey);
   const isCurrent = () => currentModelKey === modelKey && detailRenderVersion === version && box && box.isConnected;
@@ -2923,8 +3037,7 @@ async function importOffer(btn){
   } finally {
     pendingCcImports.delete(requestKey);
     btn.disabled = false;
-    btn.textContent = btn.dataset.hasCreated
-      ? (isCindy ? '再次导入 Cindy' : '再次导入 CC Switch') : label;
+    btn.textContent = btn.dataset.hasCreated ? '再次导入' : label;
   }
 }
 
@@ -2958,14 +3071,8 @@ function refreshOfferKeys(site, group){
     if (offer.site !== site || offer.group !== group) return;
     const panel = document.getElementById(`offerDetails${idx}`);
     if (!panel) return;
-    const app = document.getElementById(`offerApp${idx}`);
-    const usage = document.getElementById(`offerUsage${idx}`);
-    const selected = app && app.value, withUsage = usage && usage.checked;
+    // 导入选择存在 state.importChoice 里，重渲染不会丢，无需再从 DOM 抢救。
     panel.firstElementChild.innerHTML = offerKeyDetails(offer, idx);
-    const nextApp = document.getElementById(`offerApp${idx}`);
-    const nextUsage = document.getElementById(`offerUsage${idx}`);
-    if (nextApp && selected) nextApp.value = selected;
-    if (nextUsage && withUsage != null) nextUsage.checked = withUsage;
     bindDetailEvents(panel);
     const countCell = panel.previousElementSibling.children[3];
     countCell.innerHTML = `<span class="flag">${offerTokens(offer).length} 个</span>`;
@@ -3009,36 +3116,22 @@ async function createOfferKey(btn, offer, idx, modelKey, name){
     }
     status.innerHTML = `<div class="ok">Key「${escapeHtml(token.name || name)}」已创建${copied ? '并已复制到剪贴板' : '；浏览器未允许自动复制，请点击复制或手动复制'}。</div>
       ${!copied ? `<div class="copy-line"><input type="text" value="${escapeHtml(token.key)}" readonly aria-label="完整 Key"><button class="btn btn-sm" data-created-copy>复制 Key</button></div>` : ''}
-      <button class="btn btn-primary btn-sm" data-created-import>导入 CC Switch</button>
-      <button class="btn btn-sm" data-created-import data-target="cindy">导入到 Cindy</button>` +
+      <button class="btn btn-primary btn-sm" data-created-import>一键导入</button>` +
       (res.warning ? `<div class="note-box">${escapeHtml(res.warning)}</div>` : '');
     const copyBtn = status.querySelector('[data-created-copy]');
     if (copyBtn) copyBtn.addEventListener('click', async () => {
       copyBtn.textContent = await copyText(token.key) ? '已复制' : '请手动复制';
     });
-    const importBtns = status.querySelectorAll('[data-created-import]');
-    importBtns.forEach(b => {
-      b.dataset.offer = String(idx); b.dataset.token = String(token.id);
-      b.addEventListener('click', () => importOffer(b));
-    });
-    const importBtn = importBtns[0];
+    const importBtn = status.querySelector('[data-created-import]');
+    importBtn.dataset.offer = String(idx); importBtn.dataset.token = String(token.id);
+    importBtn.addEventListener('click', () => openImportPicker(importBtn));
     confirmDialog({
       title:copied ? 'Key 已创建并复制' : 'Key 已创建',
       body:`<p>「${escapeHtml(token.name || name)}」已创建于 ${escapeHtml(offer.site_name)} / ${escapeHtml(offer.group)}。</p>
-        <p>${copied ? '完整 Key 已复制到剪贴板。' : '浏览器未允许自动复制，可在条目下复制完整 Key。'}要导入到哪个客户端？</p>
-        <div class="row-between" style="margin-top:10px;">
-          <button class="btn btn-sm" data-created-import data-target="cindy">导入到 Cindy</button>
-          <span class="tip-inline">CC Switch 与 Cindy 是两个客户端，按你实际在用的那个选。</span>
-        </div>`,
-      okText:'导入 CC Switch', cancelText:'暂不导入',
-      onOk:() => { if (importBtn.isConnected) importOffer(importBtn); },
+        <p>${copied ? '完整 Key 已复制到剪贴板。' : '浏览器未允许自动复制，可在条目下复制完整 Key。'}要导入到哪个客户端？下一步可选 CC Switch 或 Cindy，再选具体应用。</p>`,
+      okText:'选择导入目标', cancelText:'暂不导入',
+      onOk:() => { if (importBtn.isConnected) openImportPicker(importBtn); },
     });
-    // 弹窗里的 Cindy 快捷入口：与底部主按钮并列。先关弹窗，再走同一条导入流程。
-    const dialogCindy = document.getElementById('dialogContent').querySelector('button[data-target="cindy"]');
-    if (dialogCindy){
-      dialogCindy.dataset.offer = String(idx); dialogCindy.dataset.token = String(token.id);
-      dialogCindy.addEventListener('click', () => { closeDialog(); importOffer(dialogCindy); });
-    }
   } catch (e){
     if (currentModelKey === modelKey && btn.isConnected && box){
       box.innerHTML = `<div class="err">创建失败：${escapeHtml(String(e.message || e))}</div>`;
