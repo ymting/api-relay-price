@@ -66,16 +66,20 @@ class KeyInteractionTests(unittest.TestCase):
 
     def test_existing_export_with_usage_then_repeated_export_counts(self):
         self.remote.rows=[{"id":3,"name":"actual-key","group":"default"}]
-        for expected in (4,3):
-            before=len(self.remote.calls)
-            result=self.export(key_name="ignored-request-name")
-            self.assertTrue(result["usage"])
-            self.assertEqual(result["token_name"],"actual-key")
-            self.assertEqual(result["token_id"],3)
-            self.assertEqual(len(self.remote.calls)-before,expected)
-        # 每次仍到远端核实列表、读取明文及实际单位，不复用旧 Key 列表或明文。
-        for path in ("/api/token/","/api/token/3/key","/api/status"):
-            self.assertEqual(sum(p==path for _,p,_,_ in self.remote.calls),2)
+        before=len(self.remote.calls)
+        result=self.export(key_name="ignored-request-name")
+        self.assertTrue(result["usage"])
+        self.assertEqual(result["token_name"],"actual-key")
+        self.assertEqual(result["token_id"],3)
+        # 首次仍逐项核实：身份、列表、明文、实际单位各一次。
+        self.assertEqual(len(self.remote.calls)-before,4)
+        # 2026-11-12 取舍：120 秒短会话内复用列表与明文，换重复导入秒开。
+        # 代价是窗口内不再重新核实 Key 状态，只在这台本机的内存里多留一份明文。
+        before=len(self.remote.calls)
+        again=self.export(key_name="ignored-request-name")
+        self.assertEqual(len(self.remote.calls)-before,0)
+        self.assertEqual(again["link"], result["link"])
+        self.assertEqual(again["token_id"], 3)
 
     def test_create_then_export_reuses_short_session_token_cache(self):
         # 创建接口和随后导入接口共用 120 秒短会话时，导入不应再次分页列表或 reveal。

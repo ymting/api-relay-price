@@ -188,8 +188,11 @@ def _interaction_state(router, state=None):
     # 短时交互会话会复用刚创建的 Key。这样创建后立刻导入 CCS 时，
     # 不必再次分页读取列表并重复 reveal；缓存仍绑定到该会话及其凭据版本。
     token_cache = getattr(router, "interactive_token_cache", None)
+    # Key 列表同样挂到会话上：连着导入几个模型时只拉一次列表（每次约一次海外往返），
+    # Key 增删会推进 token_version，缓存自然失效。
+    key_list_cache = getattr(router, "interactive_key_list_cache", None)
     return {"profile_cache": profile_cache if profile_cache is not None else {},
-            "key_list_cache": {},
+            "key_list_cache": key_list_cache if key_list_cache is not None else {},
             "token_cache": token_cache if token_cache is not None else {}}
 
 
@@ -398,6 +401,15 @@ def resolve_export(router, site, *, group="", create=True, name="cc-switch", tok
         key = hit.get("key") or require(
             router.fetch(Feature.KEYS_REVEAL, context=_interaction_context(operation), id=hit["id"]))["key"]
         created = False
+        # 刚验证过状态并取到明文，就存进短会话缓存：120 秒内对同一个 Key 再导入时
+        # 无需重新分页列表、也无需再 reveal 一次（这两步各约一次海外 RTT）。
+        # 缓存绑定会话与凭据版本（`_token_cache_binding`），配置或 Key 变更即失效。
+        if token_id is not None and key:
+            cache_binding = _token_cache_binding(router, site)
+            if cache_binding is not None:
+                cached_token = dict(hit, key=key, binding_ref=cache_binding[-1])
+                operation.setdefault("token_cache", {})[str(hit["id"])] = {
+                    "token": cached_token, "binding": cache_binding}
     else:
         if token_id is not None or not create:
             raise ProviderFailure(ErrorCategory.VALIDATION_ERROR)

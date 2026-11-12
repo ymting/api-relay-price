@@ -714,6 +714,10 @@ def token_session(site: dict, proxy: str = "", trigger: str = "manual"):
                 # 创建 Key 后紧接着导入 CCS 时复用本次已取得的明文和真实名称，
                 # 缓存随短会话过期，不落盘、不跨站点共享。
                 entry["session"].interactive_token_cache = {}
+                # Key 列表同样只在短会话内复用：连着导入几个模型时不用每次重拉列表。
+                entry["session"].interactive_key_list_cache = {}
+                # 余额查询结果也挂在短会话上，重复导入同一 Key 时不再重复查。
+                entry["session"].interactive_usage_cache = {}
                 entry["session"].api.read_retries = 0
                 entry["expires"] = time.monotonic() + 120
             entry["session"].trigger = trigger
@@ -723,6 +727,8 @@ def token_session(site: dict, proxy: str = "", trigger: str = "manual"):
             if entry["session"] is not None:
                 entry["session"].interactive_profile_cache.clear()
                 entry["session"].interactive_token_cache.clear()
+                entry["session"].interactive_key_list_cache.clear()
+                entry["session"].interactive_usage_cache.clear()
             entry["session"] = None
             raise
 
@@ -1066,6 +1072,9 @@ def import_config(body: dict) -> tuple[dict, int]:
 
 # CC Switch 把配置放在用户目录下，这里只做「装没装 / 什么版本」的判断，
 # 不读也不改它的数据——导出走的是深链，最终由用户在那边点确认。
+# 余额查询结果只在短会话内缓存这么久：连着导入几个模型时省掉重复的境外请求，
+# 又能保证卡片上显示的余额不会明显过期。
+USAGE_CACHE_SECONDS = 60
 CC_HOME_CANDIDATES = (
     Path.home() / ".cc-switch",
     Path.home() / "AppData" / "Roaming" / "cc-switch",
@@ -1145,12 +1154,23 @@ def export_ccswitch(body: dict) -> tuple[dict, int]:
                 _operation=operation,
             )
             usage = None
-            if body.get("with_usage", True):
-                # 用量脚本仍核实真实单位，复用本轮身份，且与共享会话在同一串行区内使用。
-                usage_result = session.fetch(Feature.CCS_USAGE, model_key=resolved["key"],
-                                            context=integration_service._interaction_context(operation))
-                if usage_result.ok:
-                    usage = usage_result.data
+            # 余额查询要多一次境外往返（约 1 秒），默认不做；导入后在 CCS 里随时能开。
+            if body.get("with_usage", False):
+                # 余额在 60 秒内基本不变，连着导入几个模型时没必要每次都查一次
+                # （每次约一次海外往返）。缓存挂在短会话上：换 Key、失败或会话过期都会重建。
+                usage_cache = getattr(session, "interactive_usage_cache", None)
+                cache_key = str(resolved["key"])
+                cached = usage_cache.get(cache_key) if isinstance(usage_cache, dict) else None
+                if cached and time.monotonic() - cached[0] <= USAGE_CACHE_SECONDS:
+                    usage = cached[1]
+                else:
+                    # 用量脚本仍核实真实单位，复用本轮身份，且与共享会话在同一串行区内使用。
+                    usage_result = session.fetch(Feature.CCS_USAGE, model_key=resolved["key"],
+                                                context=integration_service._interaction_context(operation))
+                    if usage_result.ok:
+                        usage = usage_result.data
+                        if isinstance(usage_cache, dict):
+                            usage_cache[cache_key] = (time.monotonic(), usage)
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 400
 
@@ -1174,7 +1194,7 @@ def export_ccswitch(body: dict) -> tuple[dict, int]:
     warn = []
     if resolved["created"]:
         warn.append(f"已在分组「{resolved['group']}」新建了一个 Key（{resolved['token_name'] or 'cc-switch'}）")
-    if body.get("with_usage", True) and not usage:
+    if body.get("with_usage", False) and not usage:
         warn.append("未取得可验证单位与授权的用量查询，已跳过；模型 Key 导入仍可使用")
     if wanted_format and not api_format:
         warn.append(f"当前 CC Switch（{info.get('version') or '版本未知'}）不支持 apiFormat，"

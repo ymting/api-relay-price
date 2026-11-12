@@ -924,9 +924,14 @@ class NewApiProvider(BaseProvider):
         if feature == Feature.GROUPS:
             return {"available": _unwrap(self._call("/api/user/self/groups", context, kind=self._kind))}
         if feature == Feature.KEYS_LIST:
-            rows = self._pages("/api/token/", context, self._kind)
             snapshot = self.session.snapshot(self.config_revision)
-            context.key_list_cache[(self.session, snapshot.config_revision, snapshot.token_version)] = rows
+            cache_key = (self.session, snapshot.config_revision, snapshot.token_version)
+            # 短会话内复用同一份列表：导入 Key 时列表与 reveal 各要一次海外往返，
+            # 连着导几个模型时没必要每次重拉。Key 增删会推进 token_version，缓存自动失效。
+            rows = context.key_list_cache.get(cache_key)
+            if rows is None:
+                rows = self._pages("/api/token/", context, self._kind)
+                context.key_list_cache[cache_key] = rows
             return {"items": [_public_key(row) for row in rows], "complete": True, "total": len(rows)}
         if feature == Feature.KEYS_REVEAL:
             remote_id = positive_id(params.get("id"))
@@ -1266,7 +1271,13 @@ class Sub2ApiProvider(BaseProvider):
                 raise ProviderFailure(ErrorCategory.PROTOCOL_ERROR)
             return {"available": available, "personal_rates": rates}
         if feature == Feature.KEYS_LIST:
-            rows = self._pages(self.api_prefix + "/keys", context, self._kind, sub2=True)
+            snapshot = self.session.snapshot(self.config_revision)
+            cache_key = (self.session, snapshot.config_revision, snapshot.token_version)
+            # 同 New API：短会话内复用列表，Key 增删推进 token_version 后自动失效。
+            rows = context.key_list_cache.get(cache_key)
+            if rows is None:
+                rows = self._pages(self.api_prefix + "/keys", context, self._kind, sub2=True)
+                context.key_list_cache[cache_key] = rows
             return {"items": [_public_key(row) for row in rows], "complete": True, "total": len(rows)}
         if feature == Feature.KEYS_REVEAL:
             remote_id = positive_id(params.get("id"))

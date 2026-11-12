@@ -49,6 +49,8 @@ class Router:
         if not result.ok and hasattr(self, "interactive_profile_cache"):
             # 短会话出现认证、配置或操作错误后，下一次交互重新核实身份。
             self.interactive_profile_cache.clear()
+            if hasattr(self, "interactive_key_list_cache"):
+                self.interactive_key_list_cache.clear()
         if (not result.ok or feature in {Feature.KEYS_UPDATE, Feature.KEYS_DELETE}) and hasattr(self, "interactive_token_cache"):
             # 失败或修改/撤销后，创建时的名称、权限和明文均不得继续走快速导入。
             self.interactive_token_cache.clear()

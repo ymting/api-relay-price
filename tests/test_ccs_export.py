@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from integrations.ccs import (CC_APPS, CC_APP_FORMATS, build_ccswitch_link, cc_api_formats_for,
                               cc_default_format, cc_endpoint_for, newapi_usage, sub2api_usage)
+from integrations import service as integration_service
 from integrations.configuration import merge_sites, public_site, write_json
 from integrations.contracts import Feature
 from integrations.providers import HttpResponse
@@ -346,6 +347,80 @@ class CcsProviderTests(unittest.TestCase):
         # 即使链接不带 apiFormat，端点仍按应用默认格式（Gemini 原生）停在站点根
         self.assertEqual(result["endpoint"], "https://fixture.invalid")
         self.assertTrue(any("4.0.9" in w for w in result["warn"]))
+
+
+class ExportCacheTests(unittest.TestCase):
+    """「一键导入」的短会话缓存：同一个 Key 再导一次不该重走境外请求。"""
+
+    def setUp(self):
+        fixture = stage_d.RuntimeTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.fixture = fixture
+        fixture.remote.rows = [{"id": 3, "name": "fixture-key", "group": "default"}]
+
+    def _router(self):
+        """模拟 server.token_session 给短会话挂上的三份交互缓存。"""
+        router = self.fixture.router()
+        router.interactive_profile_cache = {}
+        router.interactive_token_cache = {}
+        router.interactive_key_list_cache = {}
+        return router
+
+    def test_second_export_reuses_list_and_reveal(self):
+        router = self._router()
+        kwargs = {"group": "default", "create": False, "token_id": 3, "model": "fixture-model"}
+        first = integration_service.resolve_export(router, self.fixture.site, **kwargs)
+        before = len(self.fixture.remote.calls)
+        second = integration_service.resolve_export(router, self.fixture.site, **kwargs)
+        self.assertEqual(second["key"], first["key"])
+        self.assertEqual(len(self.fixture.remote.calls), before, "第二次导入不应再发任何请求")
+
+    def test_list_cache_is_reused_but_a_new_key_still_reveals(self):
+        self.fixture.remote.rows = [{"id": 3, "name": "k3", "group": "default"},
+                                    {"id": 4, "name": "k4", "group": "default"}]
+        router = self._router()
+        integration_service.resolve_export(router, self.fixture.site, group="default",
+                                           create=False, token_id=3, model="fixture-model")
+        before = len(self.fixture.remote.calls)
+        integration_service.resolve_export(router, self.fixture.site, group="default",
+                                           create=False, token_id=4, model="fixture-model")
+        paths = [call[1] for call in self.fixture.remote.calls[before:]]
+        self.assertNotIn("/api/token/", paths, "列表已缓存，不该重新分页")
+        self.assertIn("/api/token/4/key", paths, "新 Key 仍要现取明文")
+
+    def test_clearing_the_session_cache_forces_fresh_requests(self):
+        router = self._router()
+        kwargs = {"group": "default", "create": False, "token_id": 3, "model": "fixture-model"}
+        integration_service.resolve_export(router, self.fixture.site, **kwargs)
+        before = len(self.fixture.remote.calls)
+        # 短会话过期（或任一步失败）时 server 会把这些缓存清空，下次必须重新核实
+        router.interactive_profile_cache = {}
+        router.interactive_token_cache = {}
+        router.interactive_key_list_cache = {}
+        integration_service.resolve_export(router, self.fixture.site, **kwargs)
+        self.assertGreater(len(self.fixture.remote.calls), before, "清空缓存后必须重新请求")
+
+    def test_repeat_export_endpoint_hits_every_short_session_cache(self):
+        import server
+        fixture = self.fixture
+        write_json(fixture.config, {"sites": [fixture.site]})
+        body = {"site": fixture.site["id"], "app": "codex", "model": "fixture-model", "group": "default",
+                "token_id": 3, "create": False, "with_usage": True}
+        with ExitStack() as stack:
+            for name, value in (("TOKEN_SESSIONS", {}), ("TOKEN_REVISIONS", {}),
+                                ("find_site", lambda _: fixture.site),
+                                ("ensure_settings", lambda: {"proxy_mode": "direct"}),
+                                ("ccswitch_info", lambda: {"api_format_ok": True})):
+                stack.enter_context(patch.object(server, name, value))
+            stack.enter_context(patch.object(server.collector, "integration_runtime", return_value=fixture.runtime))
+            stack.enter_context(patch.object(server, "log_line"))
+            first, first_status = server.export_ccswitch(dict(body))
+            before = len(fixture.remote.calls)
+            second, second_status = server.export_ccswitch(dict(body))
+        self.assertEqual((first_status, second_status), (200, 200), second)
+        self.assertEqual(first["link"], second["link"])
+        self.assertEqual(len(fixture.remote.calls), before, "重复导入应全部命中短会话缓存")
 
 
 if __name__ == "__main__":

@@ -704,7 +704,8 @@ const state = {
   manualTarget: {scope:'all', sites:[], models:[]},  // 手动采集的目标，服务端已持久化
   detailFilter: 'all',    // 详情表格筛选：all | mine（只看账号能用 / 已建 Key 的分组）
   // 一键导入的选择（跨模型、跨 Key 复用）：绝大多数人只会用同一个客户端和应用。
-  importChoice: {target:'ccs', app:'', withUsage:true, format:''},
+  // 余额查询默认关：它会多一次境外往返（约 1 秒），需要时在弹窗里勾一下即可。
+  importChoice: {target:'ccs', app:'', withUsage:false, format:''},
   collectScope: 'all',    // 手动采集的范围：all | custom
   pickedSites: new Set(),  // 自定义采集选中的站点 id
   pickedModels: new Set(), // 自定义采集选中的模型 key（空 = 该站全部模型）
@@ -2912,7 +2913,7 @@ function importStep2Html(){
     <select id="importFormat"><option value=""${choice.format ? '' : ' selected'}>${escapeHtml(autoLabel)}</option>
     ${formats.map(f => `<option value="${escapeHtml(f)}"${f === choice.format ? ' selected' : ''}>${escapeHtml(formatLabel(f))}</option>`).join('')}</select></div>`;
   return appField + formatField +
-    `<label class="check"><input type="checkbox" id="importUsage"${choice.withUsage ? ' checked' : ''}> 带余额查询（写入用量脚本，导入后卡片上直接显示余额）</label>
+    `<label class="check"><input type="checkbox" id="importUsage"${choice.withUsage ? ' checked' : ''}> 带余额查询（多一次请求，约慢 1 秒；导入后 CCS 卡片上直接显示余额）</label>
      <div class="hint">端点按格式自动拼接：Anthropic / Gemini 原生停在站点根，OpenAI 系带 /v1；格式选错客户端会连不上。</div>`;
 }
 
@@ -2996,6 +2997,9 @@ async function importOffer(btn){
   pendingCcImports.add(requestKey);
   const isCurrent = () => currentModelKey === modelKey && detailRenderVersion === version && box && box.isConnected;
   btn.disabled = true; btn.textContent = '正在导入…';
+  // 首次要串行走「验证身份 → 拉 Key 列表 → 取明文 → 查余额」四步（每步一次境外往返），
+  // 之后同一 Key 会走短会话缓存，几乎瞬间返回。先把预期写出来，别让人以为卡死。
+  if (box) box.innerHTML = '<div class="hint">正在读取站点 Key 并生成导入链接…首次约 2~5 秒；同一个 Key 再次导入会快很多。</div>';
   try {
     const res = await apiPost(isCindy ? '/export/cindy' : '/export/ccswitch', payload);
     if (!res || !res.ok) throw new Error((res && res.error) || '导入失败');
